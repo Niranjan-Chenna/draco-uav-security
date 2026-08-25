@@ -1,207 +1,246 @@
 # DRACO System Architecture
 
-**Status: Proposed architecture — not implemented**
+**Status:** UDP gateway implemented; PX4 SITL integration in progress; IntentGuard components planned.
 
-This document defines the intended architecture for DRACO, a research system for studying authenticated UAV command communication. It describes the responsibilities and security boundaries that will guide a future implementation; it does not describe deployed or validated behavior.
+DRACO is an inline MAVLink reference monitor placed between an ordinary GCS/API endpoint and PX4. Its research objective is not merely to authenticate packets, but to determine whether a credential-valid command is consistent with the aircraft's committed mission intent, fresh trusted PX4 state, control context, and recent command provenance.
 
-## Design objectives
-
-The architecture is intended to:
-
-- ensure that only commands associated with an authorized session are considered;
-- authenticate command contents and detect modification;
-- reject replayed or stale command envelopes;
-- prevent commands from bypassing the UAV's state-transition policy;
-- keep security enforcement separate from the simulated flight-control logic; and
-- produce structured evidence for future security experiments.
-
-## Intended end-to-end architecture
-
-```mermaid
-flowchart TB
-    subgraph GROUND["Ground Side — Trusted Ground Environment"]
-        direction LR
-        GCS["Ground Control Station"] --> GEN["Command Generation"]
-        GEN --> SEC_IN["DRACO Ground Security Layer"]
-        subgraph GROUND_CONTROLS["Ground Security Controls"]
-            direction LR
-            SM["Session Management"] --> NG["Nonce Generation"]
-            NG --> TG["Timestamp Generation"]
-            TG --> EC["Envelope Construction"]
-            EC --> HM["HMAC Authentication"]
-        end
-        SEC_IN --> SM
-    end
-
-    subgraph COMM["Communication Layer — Potentially Hostile"]
-        direction LR
-        TX["Authenticated Command Packet"] --> CH["Command Channel"] --> RX["Received Packet"]
-    end
-
-    subgraph UAVSIDE["UAV Side — Protected Command Interface"]
-        direction LR
-        PG["Packet Parsing"] --> SV["Session Validation"]
-        SV --> TF["Timestamp Freshness Check"]
-        TF --> NR["Nonce / Replay Validation"]
-        NR --> HV["HMAC Verification"]
-        HV --> SC["State-Aware Command Validation"]
-        SC --> RESULT{"Validation Decision"}
-        RESULT -->|"Accept"| FW["UAV Firmware / Flight-Control Simulation"]
-    end
-
-    subgraph SECURITY["Security Analysis Layer"]
-        direction LR
-        ATTACKER["Adversary / Attack Simulator"]
-        LOG["Security Event Logger"]
-    end
-
-    HM --> TX
-    RX --> PG
-    ATTACKER -. "Inject crafted traffic" .-> CH
-    RESULT -->|"Reject"| LOG
-    RESULT -->|"Record decision"| LOG
-```
-
-## Component responsibilities
-
-### Ground Control Station
-
-The future GCS simulator will originate operator-selected UAV commands. It should express intent only; security metadata and cryptographic processing will be delegated to the DRACO Ground Security Layer.
-
-### Command Generation
-
-This component will convert an operator action into a normalized command request. The initial planned command vocabulary is `ARM`, `DISARM`, `TAKEOFF`, and `LAND`. Input validation and command encoding rules will be finalized with the protocol format.
-
-### DRACO Ground Security Layer
-
-The ground security layer is intended to transform a command request into an authenticated command envelope. Its planned responsibilities are:
-
-- maintaining or selecting the active authorized session;
-- generating a nonce that is fresh within that session;
-- adding a timestamp under the selected clock and freshness policy;
-- serializing security-relevant fields in an unambiguous order; and
-- generating an HMAC authentication tag over the canonical envelope contents.
-
-Key establishment, storage, rotation, and session-lifecycle details remain design decisions. No assumption is made here that a future implementation will be secure merely by using HMAC; correct key handling and canonical serialization will also be required.
-
-### Authenticated Command Channel
-
-The channel represents the transport path between the GCS and UAV. For security analysis it is considered potentially hostile: packets may be observed, delayed, dropped, duplicated, reordered, modified, or injected. The architecture does not depend on the channel itself providing authentication.
-
-The word “authenticated” describes the intended envelope carried over the channel, not a claim that the transport has already been secured.
-
-### DRACO UAV Security Gateway
-
-The gateway is intended to be the only path by which external command packets reach the simulated UAV firmware. It will apply validation in a defined order:
-
-1. parse the packet and reject malformed structures;
-2. validate the referenced session;
-3. evaluate timestamp freshness;
-4. check the nonce against the replay policy;
-5. verify the HMAC authentication tag; and
-6. authorize the command for the UAV's current state.
-
-Only a command that passes every required stage should be forwarded. Exact ordering may be refined to balance denial-of-service resistance, information exposure, and implementation simplicity.
-
-### UAV Firmware / Flight-Control Simulation
-
-The future firmware simulator will model the small state machine needed for DRACO experiments. It is intentionally separated from the security gateway so experiments can distinguish security validation from command execution and state changes. It is not intended to control a real aircraft.
-
-### Adversary / Attack Simulator
-
-The future adversary simulator will inject controlled packets into the communication channel. Planned experiments include spoofed commands, replayed valid packets, modified packets, packets associated with unauthorized sessions, and commands that are invalid for the current UAV state. No attack code is included in this design-phase repository.
-
-### Security Event Logger
-
-The proposed logger will capture security-relevant decisions without becoming part of the authorization decision itself. Future event records may include:
-
-- timestamp;
-- session identifier;
-- requested command;
-- current UAV state;
-- validation stage;
-- accept or reject decision; and
-- rejection reason.
-
-Proposed rejection reason identifiers are:
-
-```text
-INVALID_SESSION
-STALE_TIMESTAMP
-REPLAY_DETECTED
-INVALID_HMAC
-INVALID_STATE_TRANSITION
-MALFORMED_PACKET
-```
-
-These identifiers and the event schema are provisional. Logging will need to avoid exposing secret keys, full authentication material, or other sensitive data.
-
-## Trust boundaries
+## Current physical data path
 
 ```mermaid
 flowchart LR
-    TRUSTED["Trusted Ground Environment"]
-    CHANNEL["Potentially Hostile Communication Channel"]
-    GATEWAY["Protected UAV Command Interface"]
-    FIRMWARE["UAV Firmware Simulation"]
-
-    TRUSTED -->|"Trust Boundary 1: authenticated envelope leaves ground side"| CHANNEL
-    CHANNEL -->|"Trust Boundary 2: all inbound data is untrusted"| GATEWAY
-    GATEWAY -->|"Only fully validated commands"| FIRMWARE
-
-    style TRUSTED fill:#ecfeff,stroke:#0f766e,stroke-width:2px
-    style CHANNEL fill:#fff7ed,stroke:#c2410c,stroke-width:2px
-    style GATEWAY fill:#eff6ff,stroke:#1d4ed8,stroke-width:2px
-    style FIRMWARE fill:#f0fdf4,stroke:#15803d,stroke-width:2px
+    GCS[Ground Control Station / test client] <-->|UDP| DG[DRACO Gateway]
+    DG <-->|UDP| PX4[PX4 SITL]
 ```
 
-### Boundary 1: ground environment to communication channel
+The current C++ implementation already provides the bidirectional UDP transport foundation. The next milestone is replacing local fake endpoints with real MAVLink traffic from PX4 SITL and then inserting semantic enforcement into that path.
 
-The ground environment is assumed to protect its session and key material for the initial research model. Once a packet enters the channel, its confidentiality, integrity, ordering, and delivery are not trusted unless provided by an explicitly modeled mechanism.
+## Target architecture
 
-### Boundary 2: communication channel to UAV gateway
+```mermaid
+flowchart TB
+    GCS[QGroundControl / MAVSDK / Other GCS]
+    LINK[Existing link security / MAVLink signing as deployed]
 
-Every received byte is treated as attacker-controlled until validated. The gateway must not forward a command, mutate UAV state, or mark a nonce as accepted based solely on partially validated input. The precise point at which replay state is committed will be specified during implementation design.
+    subgraph D[DRACO IntentGuard]
+        IN[MAVLink Ingress]
+        PARSE[Structural Parser]
+        CLASS[Semantic Operation Classifier]
+        POLICY[Context-Aware Policy Engine]
+        DECISION{ALLOW / DENY / DEFER}
+        OUT[MAVLink Egress]
 
-### Boundary 3: gateway to simulated firmware
+        MISSION[Mission Intent + Revision Store]
+        STATE[Fresh PX4 State Cache]
+        HIST[Temporal Command History]
+        CTRL[Control / Safety Constraints]
+        EFFECT[Command Effect Contracts]
+        CAUSAL[Causal Outcome Tracker]
+        LOG[Evidence / Provenance Log]
 
-The gateway-to-firmware interface carries commands that have passed the planned security checks. The firmware simulation remains responsible for safe state changes, while the gateway enforces the command authorization policy using the current state.
+        IN --> PARSE --> CLASS --> POLICY --> DECISION
+        MISSION --> POLICY
+        STATE --> POLICY
+        HIST --> POLICY
+        CTRL --> POLICY
+        DECISION -->|ALLOW| OUT
+        DECISION -->|DENY / DEFER| LOG
+        OUT --> EFFECT --> CAUSAL --> LOG
+    end
 
-## Planned decision flow
+    PX4[PX4]
+
+    GCS --> LINK --> IN
+    OUT --> PX4
+    PX4 -->|Telemetry / ACK / vehicle state| STATE
+    PX4 -->|Observed state transitions| CAUSAL
+```
+
+## Architectural principle
+
+> DRACO never becomes the flight controller.
+
+PX4 remains responsible for stabilization, navigation, estimator behavior, failsafes, actuator output, and flight-safety logic. DRACO performs external command mediation before selected MAVLink operations are presented to PX4.
+
+## Main components
+
+### UDP gateway
+
+Implemented now in `udp_gateway.cpp`.
+
+Responsibilities:
+
+- maintain a GCS-facing UDP socket;
+- maintain a PX4-facing UDP socket;
+- use `poll()` to monitor both directions;
+- forward GCS traffic toward PX4;
+- forward PX4 traffic toward the known GCS endpoint; and
+- provide the enforced insertion point for later MAVLink parsing and policy checks.
+
+The current `have_gcs` flag is only routing state. It does **not** represent authentication or authorization.
+
+### MAVLink parser and semantic classifier
+
+This layer will convert raw frames into security-relevant operations such as:
+
+```text
+MISSION_CHANGE
+PARAMETER_WRITE
+POSITION_TARGET
+MODE_CHANGE
+COMMAND
+READ_ONLY
+UNKNOWN_WRITE
+```
+
+DRACO should preserve standard MAVLink 2 on both sides rather than invent a replacement command protocol.
+
+### Fresh PX4 state cache
+
+The state cache will hold locally observed PX4 evidence with freshness metadata, including where available:
+
+- armed/disarmed state;
+- navigation/flight mode;
+- landed/airborne state;
+- local/global position and velocity;
+- estimator validity/health;
+- failsafe state;
+- mission/navigation status; and
+- timestamp/age/validity for each item.
+
+A stale value must not be interpreted as proof that a command is safe.
+
+### Mission Intent Contract
+
+An approved mission becomes a committed revision. The store tracks:
+
+- revision identifier;
+- parent revision;
+- canonical mission hash;
+- operational area / corridor;
+- altitude envelope;
+- permitted modes;
+- mission-update policy; and
+- approved parameter profile or other mission-specific constraints.
+
+```mermaid
+flowchart LR
+    A[Approved mission] --> B[Canonical representation]
+    B --> C[Hash + revision]
+    C --> R[Active revision Rn]
+    R --> U[Proposed update]
+    U --> P{Correct parent revision?}
+    P -->|No| S[Stale / conflicting update]
+    P -->|Yes| D[Mission delta analysis]
+```
+
+### Context-aware policy engine
+
+The policy engine produces three outcomes:
+
+```text
+ALLOW
+DENY
+DEFER
+```
+
+`DEFER` exists because missing/stale evidence should not automatically become an allow decision.
 
 ```mermaid
 flowchart TD
-    RECEIVE["Receive packet"] --> STRUCTURE{"Structure valid?"}
-    STRUCTURE -->|"No"| REJECT_MALFORMED["Reject: MALFORMED_PACKET"]
-    STRUCTURE -->|"Yes"| SESSION{"Session valid?"}
-    SESSION -->|"No"| REJECT_SESSION["Reject: INVALID_SESSION"]
-    SESSION -->|"Yes"| FRESH{"Timestamp fresh?"}
-    FRESH -->|"No"| REJECT_STALE["Reject: STALE_TIMESTAMP"]
-    FRESH -->|"Yes"| NONCE{"Nonce acceptable?"}
-    NONCE -->|"No"| REJECT_REPLAY["Reject: REPLAY_DETECTED"]
-    NONCE -->|"Yes"| HMAC{"HMAC valid?"}
-    HMAC -->|"No"| REJECT_HMAC["Reject: INVALID_HMAC"]
-    HMAC -->|"Yes"| STATE{"Command valid for state?"}
-    STATE -->|"No"| REJECT_STATE["Reject: INVALID_STATE_TRANSITION"]
-    STATE -->|"Yes"| FORWARD["Forward to firmware simulation"]
-
-    REJECT_MALFORMED --> LOG["Security Event Logger"]
-    REJECT_SESSION --> LOG
-    REJECT_STALE --> LOG
-    REJECT_REPLAY --> LOG
-    REJECT_HMAC --> LOG
-    REJECT_STATE --> LOG
+    C[Credential-valid sensitive command] --> E{Evidence fresh?}
+    E -->|No| X[DEFER / DENY according to risk]
+    E -->|Yes| M{Fits committed mission?}
+    M -->|No| D[DENY]
+    M -->|Yes| S{Inside control / safety envelope?}
+    S -->|No| D
+    S -->|Yes| T{Temporal interaction acceptable?}
+    T -->|No| D
+    T -->|Yes| A[ALLOW]
 ```
 
-This is the planned validation sequence. It may change after protocol review and threat analysis; it is not implemented behavior.
+### Temporal Command Interaction Window
 
-## Open architecture decisions
+Sensitive operations will be retained for a bounded time window so DRACO can reason about command sequences rather than isolated packets.
 
-- session establishment, expiration, renewal, and teardown;
-- key provisioning, derivation, rotation, and secure storage;
-- canonical serialization and version negotiation;
-- nonce uniqueness strategy and replay-cache lifetime;
-- timestamp source, allowable clock skew, and resynchronization;
-- error-reporting granularity and resistance to validation oracles;
-- persistence and integrity requirements for security logs; and
-- interfaces between the gateway, state model, and firmware simulation.
+Example:
+
+```text
+controller-critical parameter change
+        +
+estimator-critical parameter change
+        +
+failsafe-critical parameter change
+within a short interval
+        ↓
+combined risk predicate
+```
+
+This mechanism targets attacks in which each individual command is valid but the sequence is unsafe.
+
+### Command Effect Contract
+
+For selected allowed commands, DRACO records an expected consequence.
+
+```mermaid
+sequenceDiagram
+    participant D as DRACO
+    participant P as PX4
+
+    D->>P: Forward allowed command
+    D->>D: Register expected effect + deadline
+    P-->>D: COMMAND_ACK
+    P-->>D: State / navigation update
+    D->>D: CONFIRMED / FAILED / MISMATCH
+```
+
+DRACO can also flag important transitions for which it observes no accepted external command, expected mission progression, or recognized PX4 internal cause.
+
+### Evidence / provenance log
+
+The log is intended to relate:
+
+```text
+source
++ command
++ mission revision
++ evidence snapshot
++ policy version
++ decision / reason
++ PX4 acknowledgement
++ observed outcome
+```
+
+Tamper-evident chaining can be added later, but logging alone is not the research novelty.
+
+## Primary protected operation families
+
+The first complete IntentGuard implementation will prioritize:
+
+1. mission changes;
+2. parameter writes; and
+3. external position/setpoint commands.
+
+These provide a focused path to demonstrate credential-valid cyber-physical misuse without attempting full MAVLink dialect coverage immediately.
+
+## Trust and deployment boundaries
+
+```mermaid
+flowchart LR
+    NET[External network / radio / GCS] -->|Untrusted inbound MAVLink| D[DRACO enforcement boundary]
+    D -->|Only allowed traffic| P[Private PX4-side link]
+    P --> PX4[PX4]
+```
+
+For the transparent prototype, state is initially derived from PX4 MAVLink telemetry. A hardened later variant may use a private/internal state source or PX4 integration to reduce reliance on externally visible telemetry.
+
+The architecture assumes DRACO is on the enforced ingress path. If another network or serial path can directly reach PX4, that bypass must be closed or explicitly treated as a limitation.
+
+## Out of core scope for the first implementation
+
+- custom encryption or custom PKI;
+- RF jamming defense;
+- GNSS RF anti-spoofing;
+- compromised PX4 itself;
+- generic ML anomaly detection on the critical path;
+- swarm/fleet coordination; and
+- certification claims for real aircraft.
