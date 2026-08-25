@@ -1,111 +1,57 @@
-# DRACO — Secure Command Authentication for UAV Systems
+# DRACO Documentation Index
 
-![Research Project](https://img.shields.io/badge/type-research%20project-334155)
-![Architecture Phase](https://img.shields.io/badge/status-architecture%20%26%20design-0f766e)
+This directory contains the current design and execution documents for **DRACO IntentGuard**, a context-aware MAVLink security gateway for PX4.
 
-**Project Status: Architecture & Design Phase**
+The project has moved beyond its earlier custom HMAC-envelope concept. The current research direction is to mediate **credential-valid, well-formed MAVLink commands** using committed mission intent, fresh PX4 state, control/safety constraints, temporal command interactions, and command-to-outcome provenance.
 
-DRACO is a research-oriented cybersecurity architecture being designed to investigate secure, authenticated command communication between a UAV Ground Control Station (GCS) and UAV firmware. The present repository defines the system design, security boundaries, threat model, protocol concept, and development roadmap. Implementation will be developed incrementally after the architecture and protocol have been reviewed and finalized.
+## Documents
 
-## Architecture at a glance
+- [System architecture](system-architecture.md) — current gateway foundation, target IntentGuard architecture, trust boundaries, state cache, mission intent, temporal history, and causal outcome tracking.
+- [MAVLink mediation design](protocol-design.md) — raw MAVLink processing pipeline, semantic operation model, evidence snapshots, Mission Intent Contract, verdicts, and Command Effect Contracts.
+- [Threat model](threat-model.md) — credential-valid attacker model, evidence assumptions, attack classes, and residual risks.
+- [Development roadmap](development-roadmap.md) — implementation plan through the 30 September 2026 project freeze.
+- [Changelog](CHANGELOG.md) — major changes in project direction and implementation status.
+
+## Current implementation snapshot
 
 ```mermaid
 flowchart LR
-    subgraph GROUND["Ground Control System — Trusted Ground Environment"]
-        direction TB
-        GCS["Ground Control Station"]
-        GEN["Command Generation"]
-        subgraph GSEC["DRACO Ground Security Layer"]
-            direction TB
-            SESSION["Session Management"]
-            FRESH["Nonce + Timestamp Generation"]
-            ENVELOPE["Command Envelope Construction"]
-            AUTH["HMAC Authentication"]
-            SESSION --> FRESH --> ENVELOPE --> AUTH
-        end
-        GCS --> GEN --> SESSION
-    end
-
-    subgraph CHANNEL["Communication Layer — Untrusted Boundary"]
-        PACKET["Authenticated Command Packet"]
-        LINK["Authenticated Command Channel"]
-        PACKET --> LINK
-    end
-
-    subgraph UAV["UAV Side — Protected Command Interface"]
-        direction TB
-        subgraph GATEWAY["DRACO UAV Security Gateway"]
-            direction TB
-            PARSE["Packet Parsing"]
-            VALIDATE["Session + Freshness + Replay Checks"]
-            VERIFY["HMAC Verification"]
-            STATE["State-Aware Command Validation"]
-            PARSE --> VALIDATE --> VERIFY --> STATE
-        end
-        FIRMWARE["UAV Firmware / Flight-Control Simulation"]
-        DECISION{"Accept or Reject"}
-        STATE --> DECISION
-        DECISION -->|"Accepted"| FIRMWARE
-    end
-
-    subgraph ANALYSIS["Security Analysis Layer"]
-        ADV["Adversary / Attack Simulator"]
-        LOGGER["Security Event Logger"]
-    end
-
-    AUTH --> PACKET
-    LINK --> PARSE
-    ADV -. "Spoofed, replayed, modified, unauthorized, or state-invalid packets" .-> LINK
-    DECISION -->|"Rejected"| LOGGER
-
-    style GROUND fill:#ecfeff,stroke:#0f766e,stroke-width:2px
-    style CHANNEL fill:#fff7ed,stroke:#c2410c,stroke-width:2px
-    style UAV fill:#eff6ff,stroke:#1d4ed8,stroke-width:2px
-    style ANALYSIS fill:#fdf2f8,stroke:#be185d,stroke-width:2px
-    style GSEC fill:#f0fdfa,stroke:#0d9488
-    style GATEWAY fill:#eff6ff,stroke:#2563eb
+    G[Fake / test GCS] <-->|UDP| D[DRACO C++ gateway] <-->|UDP| P[Fake PX4 endpoint]
 ```
 
-The intended design places security enforcement on both sides of a potentially hostile communication channel. Ground-side controls construct and authenticate each command envelope; the UAV-side gateway validates the packet before any command can reach the simulated flight-control interface. A future adversary simulator will inject malicious traffic for controlled security experiments, while rejected commands will be recorded by a proposed security event logger.
+Completed in code:
 
-## Security goals
+- bidirectional UDP forwarding;
+- separate GCS- and PX4-facing sockets;
+- `poll()`-based multiplexing;
+- return-path tracking for the current GCS test client; and
+- end-to-end local round-trip testing.
 
-DRACO is being designed to explore application-layer defenses against:
+PX4 SITL with Gazebo X500 has also been launched successfully. The next implementation step is real PX4 MAVLink passthrough through DRACO.
 
-- replay attacks and stale command reuse;
-- command spoofing and unauthorized command injection;
-- modification of commands in transit; and
-- commands that violate the UAV's current operational state.
+## Target research flow
 
-The planned architecture combines HMAC-based authentication, session management, nonce and timestamp freshness validation, and state-aware command authorization. These are design goals and intended mechanisms; they have not yet been implemented, tested, validated, or benchmarked.
+```mermaid
+flowchart TD
+    MAV[MAVLink frame] --> CLASS[Semantic classification]
+    CLASS --> EVIDENCE[Fresh PX4 evidence]
+    EVIDENCE --> INTENT[Mission Intent Contract]
+    INTENT --> HISTORY[Temporal command history]
+    HISTORY --> POLICY[Context-aware policy]
+    POLICY --> V{ALLOW / DENY / DEFER}
+    V -->|ALLOW| PX4[PX4]
+    PX4 --> EFFECT[Observed ACK / state transition]
+    EFFECT --> CAUSAL[Causal outcome tracking]
+```
 
-## Current design
+## Research focus
 
-The conceptual command envelope contains a session identifier, command, UAV state, nonce, timestamp, and authentication tag. The initial command set is `ARM`, `DISARM`, `TAKEOFF`, and `LAND`, operating across the proposed `DISARMED`, `ARMED`, and `IN_AIR` states.
+The first complete implementation prioritizes:
 
-The exact serialization, cryptographic parameters, key-management approach, replay-cache behavior, clock policy, and field sizes remain open design decisions.
+```text
+MISSION_CHANGE
+PARAMETER_WRITE
+POSITION_TARGET
+```
 
-## Documentation
-
-- [System architecture](docs/system-architecture.md) — components, data flow, security boundaries, and logging design
-- [Protocol design](docs/protocol-design.md) — conceptual envelope, intended authentication flow, and UAV state model
-- [Threat model](docs/threat-model.md) — threats, assumptions, intended mitigations, and adversary model
-- [Development roadmap](docs/development-roadmap.md) — staged path from design to evaluation
-
-## Roadmap summary
-
-1. Review and refine the architecture and protocol.
-2. Build the core GCS, channel, UAV, and state-machine simulation.
-3. Add session, HMAC, freshness, and replay-protection mechanisms.
-4. Develop controlled adversary simulations.
-5. Evaluate security behavior and performance trade-offs.
-
-See the [development roadmap](docs/development-roadmap.md) for the complete phase checklist.
-
-## Research scope
-
-DRACO currently focuses on command authentication at the application/security layer. It does not attempt to model every physical, radio-frequency, hardware, avionics, or flight-control threat. The repository contains design documentation only; no operational UAV software or attack tooling is included.
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
+The key research question is whether a transparent raw-MAVLink gateway can prevent credential-valid cyber-physical misuse without becoming the flight controller or requiring a replacement GCS protocol.
