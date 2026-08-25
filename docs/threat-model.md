@@ -1,112 +1,147 @@
 # DRACO Threat Model
 
-**Status: Initial threat model — planned mechanisms are not yet implemented or validated**
+**Status:** Updated for the IntentGuard research direction.
 
-## Scope
+## Primary research threat
 
-DRACO is studying command authentication and authorization at the application/security layer between a Ground Control Station and a simulated UAV command interface. The initial model focuses on hostile manipulation of command traffic and incorrect command acceptance.
+DRACO's main adversary is **not merely an unauthenticated network attacker**. The central research case is a credential-valid or otherwise authorized GCS endpoint that can send well-formed MAVLink commands whose cyber-physical meaning is unsafe for the current aircraft state or committed mission.
 
-This phase does not attempt to comprehensively model physical capture, radio-frequency interference or jamming, traffic analysis, hardware faults, sensor spoofing, supply-chain compromise, firmware exploitation, ground-station malware, denial of service, or the safety and control dynamics of a real aircraft. These exclusions do not imply that the threats are unimportant; they constrain the first research questions to a tractable scope.
+Examples include:
+
+- a compromised legitimate GCS;
+- stolen or misused valid credentials;
+- a malicious authorized operator;
+- a valid endpoint issuing unsafe mission revisions;
+- a valid endpoint modifying flight-critical parameters; and
+- a valid endpoint sending dangerous but syntactically correct setpoints or command sequences.
+
+## Why this matters
+
+Traditional communication security can answer questions such as:
+
+```text
+Who sent this packet?
+Was it modified?
+Is it fresh?
+Is this message type allowed?
+```
+
+DRACO asks an additional question:
+
+```text
+Even if this command is valid and authenticated,
+should it be allowed for THIS aircraft,
+under THIS committed mission,
+in THIS current state,
+at THIS moment?
+```
+
+## Threat matrix
+
+| Threat | Credential state | DRACO objective |
+| --- | --- | --- |
+| Passive eavesdropping | none required | Rely on established transport/link security; not core novelty |
+| Packet modification / injection without valid credentials | invalid | Existing signing/secure transport should help; baseline only |
+| Replay / stale network traffic | may be invalid or previously valid | Treat as supporting link-security concern |
+| Stolen credential | valid | Primary target: constrain behavior to mission/state/control envelope |
+| Compromised legitimate GCS | valid | Primary target |
+| Malicious authorized operator | valid | Primary target |
+| Unsafe mission replacement | valid | Detect mission-intent or revision conflict |
+| Flight-critical parameter manipulation | valid | Evaluate parameter risk + state + temporal interaction |
+| Unsafe position/setpoint request | valid | Compare target/trajectory with mission corridor and state |
+| Delayed or stale state evidence | command may be valid | DENY/DEFER when evidence is too old for a safe decision |
+| Compromised companion bypassing DRACO | varies | Deployment limitation unless downstream path is isolated |
+| Compromised PX4 / flight controller | N/A | Out of scope for first prototype |
+| Physical sensor spoofing / RF attacks | N/A | Mostly out of scope; may affect evidence quality |
 
 ## Assets and security properties
 
-The planned system aims to protect:
+DRACO aims to protect:
 
-- authenticity of command origin within an authorized session;
-- integrity of every security-relevant command-envelope field;
-- freshness and one-time acceptance of eligible commands;
-- authorization of commands against the current UAV state;
-- separation between untrusted channel input and the firmware interface; and
-- useful, non-secret security decision records for later analysis.
+- integrity of the external command path into PX4;
+- consistency between accepted commands and committed mission intent;
+- use of fresh, locally observed PX4 state in authorization;
+- bounded handling of sensitive command sequences;
+- separation between untrusted inbound traffic and the PX4-facing link;
+- causal linkage between selected accepted commands and later PX4 outcomes; and
+- evidence explaining why a sensitive command was allowed, denied, or deferred.
 
-Availability and confidentiality may be considered in later phases, but they are not the primary guarantees of the initial command-authentication design.
+## Core trust assumptions
 
-## Threats and planned security mechanisms
+The first prototype assumes:
 
-| Threat | Intended attacker action | Planned security mechanism | Intended mitigation |
-| --- | --- | --- | --- |
-| Command spoofing | Construct a packet that appears to originate from the authorized GCS. | HMAC authentication with session-associated secret material. | Reject packets whose authentication tag cannot be verified. |
-| Replay of a valid command | Capture a legitimate packet and retransmit it later. | Nonce tracking plus timestamp freshness validation. | Reject previously used nonces and packets outside the permitted freshness window. |
-| Packet modification | Alter a command or security field while a packet is in transit. | HMAC integrity verification over a canonical envelope. | Detect any authenticated-field modification before forwarding the command. |
-| Unauthorized session | Send a command without an active, recognized session. | Session validation and session-to-key binding. | Reject packets with missing, expired, unknown, or improperly bound sessions. |
-| Stale command | Delay or retain a packet until its context may no longer be valid. | Timestamp validation. | Reject packets outside the planned acceptance window. |
-| Invalid command transition | Request an operation that is not allowed in the current UAV state. | State-aware command authorization. | Reject commands absent from the permitted transition set for the current state. |
-| Malformed packet | Supply incomplete, ambiguous, oversized, or incorrectly encoded input. | Strict parsing and schema validation. | Reject the packet before security-sensitive processing or state changes. |
+- PX4 itself is trusted;
+- DRACO executes on the enforced path between external control traffic and PX4;
+- the PX4-side path is not independently reachable by an attacker;
+- state observed from PX4 is more trustworthy than state claimed by the GCS;
+- configured mission intent and policy are themselves approved inputs;
+- clocks/timestamps used for evidence age are monotonic and sufficiently reliable; and
+- any existing cryptographic transport/signing mechanism is implemented correctly when used.
 
-All entries describe intended mitigations. No security mechanism in this table has yet been implemented, tested, or shown to prevent the corresponding threat.
+## Evidence model
 
-## Trust assumptions
+Security decisions should distinguish **known**, **stale**, and **unknown** state.
 
-The initial design assumes:
-
-- the GCS and UAV gateway begin with or can establish appropriate shared secret material through a future trusted provisioning or session-establishment process;
-- the trusted endpoints, their cryptographic libraries, and their random-number sources behave correctly for the purpose of the first simulation;
-- the ground environment protects active session secrets from the modeled network adversary;
-- the UAV security gateway is the enforced entry point for external commands;
-- the current UAV state is available accurately to the state-validation component;
-- clocks are sufficiently synchronized for a future, explicitly defined freshness policy; and
-- the communication channel provides no inherent guarantee of origin, integrity, freshness, ordering, or delivery.
-
-Key compromise, malicious trusted insiders, endpoint takeover, and rollback of persisted security state are outside the first model and should be considered in later threat-model revisions.
-
-## Security boundaries
-
-```text
-Trusted Ground Environment
-        |
-        | Trust Boundary: authenticated envelope enters an untrusted medium
-        v
-Potentially Hostile Communication Channel
-        |
-        | Trust Boundary: all received packet data requires validation
-        v
-Protected UAV Command Interface
-        |
-        | Only accepted commands may cross
-        v
-UAV Firmware / Flight-Control Simulation
+```mermaid
+flowchart TD
+    S[PX4 state evidence] --> A{Age within policy?}
+    A -->|Yes| K[Known / usable]
+    A -->|No| U[Stale / unknown]
+    U --> D{Command risk class}
+    D -->|Low risk| R[Policy-defined handling]
+    D -->|Sensitive| X[DEFER or DENY]
 ```
 
-The channel is deliberately treated as hostile for future attack simulation. An adversary may be able to observe, retain, reorder, duplicate, modify, and inject packets. The architecture should not interpret successful delivery as evidence of authenticity.
+A missing or stale position estimate must never silently become proof that a requested setpoint is safe.
 
-## Adversary model
+## Sensitive attack classes
 
-The future adversary simulator may attempt to:
+### Mission-intent violation
 
-- capture a legitimate command packet;
-- replay an old packet;
-- modify the command or another envelope field;
-- construct a forged packet without valid authentication material;
-- send commands without a valid session; and
-- send commands inconsistent with the UAV's current state.
+An authenticated endpoint uploads or replaces a mission that is structurally valid but inconsistent with the current committed revision or operating envelope.
 
-The initial adversary is modeled as having control over the communication channel but not access to uncompromised secret keys or trusted endpoint memory. Experiments should clearly state when they relax any of these assumptions. This repository does not contain attack code.
+### Parameter manipulation
 
-## Proposed security events
+An authenticated endpoint modifies controller-, estimator-, navigation-, failsafe-, or security-critical parameters. DRACO should consider both the individual parameter and nearby sensitive changes.
 
-Future experiments are expected to record the validation stage and decision using stable reason identifiers such as:
+### Setpoint / offboard deviation
 
-| Proposed reason | Meaning |
-| --- | --- |
-| `INVALID_SESSION` | The packet does not reference an acceptable active session. |
-| `STALE_TIMESTAMP` | The packet timestamp is outside the permitted freshness window. |
-| `REPLAY_DETECTED` | The nonce violates the session replay policy. |
-| `INVALID_HMAC` | Authentication-tag verification fails. |
-| `INVALID_STATE_TRANSITION` | The command is not allowed in the current UAV state. |
-| `MALFORMED_PACKET` | The packet cannot be parsed under the expected schema. |
+A valid command requests a position, trajectory, or mode inconsistent with the committed mission corridor or current state.
 
-Reason granularity will be reviewed to ensure logs remain useful without exposing an attacker-facing validation oracle.
+### Temporal command interaction
 
-## Residual risks and limitations
+Several commands are individually acceptable but collectively dangerous because of timing, rate, ordering, or coupled effects.
 
-Even if the planned mechanisms are implemented correctly, the initial design would not by itself address:
+### Conflicting mission revision
 
-- compromise or theft of shared keys;
-- a malicious or compromised authorized GCS;
-- attacks that prevent packet delivery;
-- confidentiality of command contents;
-- unsafe but state-valid authorized commands;
-- vulnerabilities inside the firmware or cryptographic implementation; or
-- physical, RF, sensor, and hardware attacks outside the modeled interface.
+A controller attempts to modify an old mission revision after another valid controller has already advanced the active revision.
 
-These limitations will inform later protocol refinement and evaluation criteria.
+### Unexplained state transition
+
+PX4 enters a security-relevant state for which DRACO has not observed an accepted command, expected mission progression, or recognized internal safety cause.
+
+## Security decision model
+
+```text
+ALLOW  = enough fresh evidence exists and policy permits the operation
+DENY   = policy positively identifies a violation
+DEFER  = evidence is insufficient or stale for a safe positive authorization
+```
+
+`DEFER` is intentionally different from `DENY`: it records uncertainty rather than pretending that missing evidence proves malicious intent.
+
+## Residual risks
+
+Even a correct IntentGuard implementation cannot by itself guarantee safety against:
+
+- compromised PX4 firmware;
+- malicious sensors or complete sensor spoofing;
+- RF jamming and communication denial;
+- physical capture;
+- policy misconfiguration;
+- mission-intent definitions that are themselves unsafe;
+- bypass paths around DRACO;
+- stolen credentials used entirely within the approved mission envelope; or
+- unsafe dynamics not captured by the first control/safety model.
+
+These limitations must remain explicit in evaluation and paper claims.
