@@ -6,9 +6,11 @@
 #include <arpa/inet.h>
 #include <cstdint>
 #include <poll.h>
+#include "mavlink_parser.h"
+#include "semantic_classifier.h"
 void run_gateway () {
     using namespace std;
-    int sockfd = socket(AF_INET,SOCK_DGRAM,0); //sockfd is to create a socket with afinet telling its ipv4 and sock stream is telling udp
+    int sockfd = socket(AF_INET,SOCK_DGRAM,0); //// create ipv4 udp socket
     if (sockfd==-1) {
         cout <<"socket creation failed"<<endl;
 
@@ -34,10 +36,6 @@ void run_gateway () {
     char buffer[10240]; // to store the data from client
     sockaddr_in client_addr{}; // creating socket address for client
     socklen_t client_addr_len=sizeof(client_addr);
-    sockaddr_in forward_addr{}; // creating socket address for forward address
-    forward_addr.sin_family = AF_INET; // telling its ipv4  
-    forward_addr.sin_port=htons(14561);
-    inet_pton(AF_INET,"127.0.0.1",&forward_addr.sin_addr);
     int px4_sockfd=socket(AF_INET,SOCK_DGRAM,0);//sockfd for px4
     if (px4_sockfd==-1) {
     cout <<"socket creation failed"<<endl;
@@ -102,13 +100,47 @@ void run_gateway () {
     cout << "recvfrom failed: "
               << strerror(errno)
               << endl;
+            continue;
     } else {have_gcs = true;
     cout << "Received "
               << bytes_received
               << " bytes"
               << endl;
     }
-    cout<<"message: "<<string(buffer,bytes_received)<<endl; // printing the message received from client
+    if (bytes_received > 0) {
+    auto parsed_message = parse_mavlink_data(
+        reinterpret_cast<const uint8_t*>(buffer),
+        static_cast<size_t>(bytes_received),
+        MavlinkDirection::GCS_TO_PX4
+    );
+
+    for (const auto& parsed : parsed_message) {
+        const auto& msg = parsed.message;
+        
+        cout << "GCS MAVLink:"
+             << " msgid=" << msg.msgid
+             << " sysid=" << static_cast<int>(msg.sysid)
+             << " compid=" << static_cast<int>(msg.compid)
+             << " seq=" << static_cast<int>(msg.seq)
+             << " payload_len=" << static_cast<int>(msg.len)
+             << " family="
+            << message_family_name(
+            classify_message_family(parsed)
+        )
+            << " operation="
+            << semantic_operation_name(
+            classify_semantic_operation(parsed)
+        )
+             << endl;
+        
+
+
+
+    }
+    
+}
+    
+    
     char client_ip[INET_ADDRSTRLEN];//to store ip address of the client
     inet_ntop(//converting the ip address from network to printable form conversion
         AF_INET,
@@ -131,13 +163,14 @@ void run_gateway () {
                   << strerror(errno)
                   << endl;
     } else {
+        
         cout << "Sent "
                   << bytes_sent
                   << " bytes"
                   << endl;
     }
     }
-    if (fds[1].revents & POLLIN) {uint32_t message_id =0;
+    if (fds[1].revents & POLLIN) {
     ssize_t px4_bytes_received = recvfrom(
     px4_sockfd,
     buffer,
@@ -150,47 +183,36 @@ void run_gateway () {
     cout << "PX4 recvfrom failed: "
          << strerror(errno)
          << endl;
+        continue;
 } else {
     cout << "Received "
          << px4_bytes_received
          << " bytes from PX4 side"
          << endl;
-         if (px4_bytes_received >= 10 &&static_cast<unsigned char>(buffer[0]) == 0xFD) {
+         if (px4_bytes_received > 0 ) {
+            auto parsed_message = parse_mavlink_data(// sending it to mavlink parser.h to check if its valid or not
+                reinterpret_cast<const uint8_t*>(buffer),
+                static_cast<size_t>(px4_bytes_received),
+                MavlinkDirection::PX4_TO_GCS
+            );
+            for (const auto& parsed : parsed_message) {
+                const auto& msg = parsed.message;
+               
+            cout << "Library MAVLink:"
+             << " msgid=" << msg.msgid
+             << " sysid=" << static_cast<int>(msg.sysid)
+             << " compid=" << static_cast<int>(msg.compid)
+             << " seq=" << static_cast<int>(msg.seq)
+             << " payload_len=" << static_cast<int>(msg.len)
+                << " family="
+            << message_family_name(classify_message_family(parsed))
+            << " operation="
+            << semantic_operation_name(classify_semantic_operation(parsed))
+          
+             << endl;
+    }
             
-            cout<<"First Byte: 0x"
-            <<hex
-            <<static_cast<int>(// static cast is like int() in python which converts from one datatype into another
-                static_cast<unsigned char>(buffer[0])
-            )
-            <<dec
-            <<endl;
-            cout<<"Payload length:"
-            <<static_cast<int>(
-                static_cast<unsigned char>(buffer[1]))
-                <<endl;
-            
-            
-             message_id =//message id is 24 bit so it needs to be divided into 3 bytes buffer
-                static_cast<unsigned char>(buffer[7]) |
-                (static_cast<unsigned char>(buffer[8]) <<8)|
-                (static_cast<unsigned  char>(buffer[9]) <<16);
-            
-            cout<<"System Id: "
-                <<static_cast<int>(
-                    static_cast<unsigned char>(buffer[5])
-                )<<endl;
-            
-            cout<<"Component Id: "
-                <<static_cast<int>(
-                    static_cast<unsigned char>(buffer[6])
-                )<<endl;
-            cout<<"Sequence number:"
-             <<static_cast<int>(
-                static_cast<unsigned char>(buffer[4]))<<endl;
-            cout << "Message ID:"
-                 << message_id
-                 <<endl;
-            
+           
          }
 }
     if (have_gcs) {
