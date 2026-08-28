@@ -137,7 +137,7 @@ void run_gateway () {
                   << endl;
     }
     }
-    if (fds[1].revents & POLLIN) {
+    if (fds[1].revents & POLLIN) {uint32_t message_id =0;
     ssize_t px4_bytes_received = recvfrom(
     px4_sockfd,
     buffer,
@@ -155,7 +155,8 @@ void run_gateway () {
          << px4_bytes_received
          << " bytes from PX4 side"
          << endl;
-         if (px4_bytes_received > 10) {
+         if (px4_bytes_received >= 10 &&static_cast<unsigned char>(buffer[0]) == 0xFD) {
+            
             cout<<"First Byte: 0x"
             <<hex
             <<static_cast<int>(// static cast is like int() in python which converts from one datatype into another
@@ -169,7 +170,7 @@ void run_gateway () {
                 <<endl;
             
             
-            uint32_t message_id =//message id is 24 bit so it needs to be divided into 3 bytes buffer
+             message_id =//message id is 24 bit so it needs to be divided into 3 bytes buffer
                 static_cast<unsigned char>(buffer[7]) |
                 (static_cast<unsigned char>(buffer[8]) <<8)|
                 (static_cast<unsigned  char>(buffer[9]) <<16);
@@ -210,6 +211,7 @@ if (bytes_sent_to_gcs == -1) {
          << bytes_sent_to_gcs
          << " bytes back to GCS"
          << endl;
+
 }
     }
     }
