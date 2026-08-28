@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cstring>
 #include <arpa/inet.h>
+#include <cstdint>
 #include <poll.h>
 void run_gateway () {
     using namespace std;
@@ -45,7 +46,7 @@ void run_gateway () {
     cout<<"socket created successfully"<<endl;}
     sockaddr_in px4_local_addr{};
     px4_local_addr.sin_family = AF_INET;
-    px4_local_addr.sin_port = htons(14561);
+    px4_local_addr.sin_port = htons(14550);
     px4_local_addr.sin_addr.s_addr = INADDR_ANY;
     int px4_bind_result=bind(
         px4_sockfd,
@@ -60,7 +61,7 @@ void run_gateway () {
 
     sockaddr_in px4_target_addr{};// creating socket address for px4 target 
     px4_target_addr.sin_family = AF_INET;
-    px4_target_addr.sin_port = htons(14562);//htons for port for px4
+    px4_target_addr.sin_port = htons(18570);//htons for port for px4
     inet_pton(
         AF_INET,
         "127.0.0.1",
@@ -154,6 +155,42 @@ void run_gateway () {
          << px4_bytes_received
          << " bytes from PX4 side"
          << endl;
+         if (px4_bytes_received > 10) {
+            cout<<"First Byte: 0x"
+            <<hex
+            <<static_cast<int>(
+                static_cast<unsigned char>(buffer[0])
+            )
+            <<dec
+            <<endl;
+            cout<<"Payload length:"
+            <<static_cast<int>(
+                static_cast<unsigned char>(buffer[1]))
+                <<endl;
+            
+            
+            uint32_t message_id =
+                static_cast<unsigned char>(buffer[7]) |
+                (static_cast<unsigned char>(buffer[8]) <<8)|
+                (static_cast<unsigned  char>(buffer[9]) <<16);
+            
+            cout<<"System Id: "
+                <<static_cast<int>(
+                    static_cast<unsigned char>(buffer[5])
+                )<<endl;
+            
+            cout<<"Component Id: "
+                <<static_cast<int>(
+                    static_cast<unsigned char>(buffer[6])
+                )<<endl;
+            cout<<"Sequence number:"
+             <<static_cast<int>(
+                static_cast<unsigned char>(buffer[4]))<<endl;
+            cout << "Message ID:"
+                 << message_id
+                 <<endl;
+            
+         }
 }
     if (have_gcs) {
     ssize_t bytes_sent_to_gcs = sendto(
@@ -177,10 +214,8 @@ if (bytes_sent_to_gcs == -1) {
     }
     }
 
+
 }
-
-
-
 
 
 }
