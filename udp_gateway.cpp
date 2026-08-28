@@ -158,7 +158,7 @@ void run_gateway () {
          if (px4_bytes_received > 10) {
             cout<<"First Byte: 0x"
             <<hex
-            <<static_cast<int>(
+            <<static_cast<int>(// static cast is like int() in python which converts from one datatype into another
                 static_cast<unsigned char>(buffer[0])
             )
             <<dec
@@ -169,7 +169,7 @@ void run_gateway () {
                 <<endl;
             
             
-            uint32_t message_id =
+            uint32_t message_id =//message id is 24 bit so it needs to be divided into 3 bytes buffer
                 static_cast<unsigned char>(buffer[7]) |
                 (static_cast<unsigned char>(buffer[8]) <<8)|
                 (static_cast<unsigned  char>(buffer[9]) <<16);
