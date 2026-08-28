@@ -1,48 +1,78 @@
 # DRACO — UAV-Side MAVLink Security Gateway
 
-DRACO is an active research prototype built around a C++ UDP gateway between a Ground Control Station path and PX4 SITL.
+DRACO is an active research prototype built around a C++ UDP gateway placed transparently between QGroundControl and PX4 SITL.
 
 This public repository intentionally documents **only work that has already been implemented or directly verified**. Detailed future research phases and unpublished design ideas are kept out of the public repository while development is ongoing.
 
-## Current implementation status
+## Current Implementation Status
+
+Two implementation milestones have been completed and directly verified:
+
+- Phase 0 — Transport Foundation ✅
+- Phase 1 — Transparent QGroundControl ↔ DRACO ↔ PX4 SITL Path ✅
 
 The following work has been completed and tested:
 
-- C++ project builds successfully under Ubuntu 24.04 on WSL2;
-- minimal `main.cpp` entry point launches the gateway;
-- separate `udp_gateway.cpp` contains the network gateway logic;
-- GCS-facing IPv4 UDP socket created and bound;
-- PX4-facing IPv4 UDP socket created and bound;
-- `poll()` used to monitor both sockets in one thread;
-- GCS → DRACO → PX4-side forwarding implemented;
-- PX4-side → DRACO → remembered GCS endpoint forwarding implemented;
-- complete bidirectional UDP round-trip verified with local test endpoints;
-- compiled `draco` binary excluded through `.gitignore`;
-- PX4-Autopilot SITL installed and built;
-- Gazebo X500 simulation launched successfully;
-- active PX4 MAVLink UDP instance inspected with `mavlink status`;
-- DRACO PX4-facing socket connected to the real PX4 SITL MAVLink path;
-- live PX4 UDP traffic received by DRACO;
-- MAVLink 2 framing confirmed from live traffic using the `0xFD` magic byte;
-- payload length inspected from live MAVLink frames;
-- 24-bit MAVLink message IDs reconstructed from the live header;
-- MAVLink system ID, component ID, and sequence number inspected.
+- C++ project builds successfully under Ubuntu 24.04 on WSL2
+- Minimal `main.cpp` entry point launches the gateway
+- Separate `udp_gateway.cpp` contains the network gateway logic
+- GCS-facing IPv4 UDP socket created and bound to UDP `:14560`
+- PX4-facing IPv4 UDP socket created and bound to UDP `:14550`
+- `poll()` used to monitor both sockets in a single thread
+- GCS → DRACO → PX4 forwarding implemented
+- PX4 → DRACO → remembered GCS endpoint forwarding implemented
+- Bidirectional UDP communication verified
+- PX4-Autopilot SITL installed and built
+- Gazebo X500 simulation launched successfully
+- Active PX4 MAVLink UDP instance inspected using `mavlink status`
+- DRACO connected to the real PX4 SITL MAVLink path
+- Live PX4 MAVLink traffic received by DRACO
+- MAVLink 2 framing confirmed using the `0xFD` magic byte
+- MAVLink payload length inspected
+- 24-bit MAVLink message IDs reconstructed from the MAVLink 2 header
+- MAVLink system ID, component ID, and sequence number inspected
+- QGroundControl configured as the real Ground Control Station
+- QGroundControl traffic routed through DRACO rather than directly to PX4
+- Genuine QGroundControl MAVLink traffic received by DRACO
+- QGroundControl packets forwarded unchanged to PX4 SITL
+- PX4 telemetry forwarded through DRACO back to QGroundControl
+- QGroundControl successfully discovered the simulated X500 through DRACO
+- Normal heartbeat and telemetry display verified
+- ARM and DISARM commands successfully passed through DRACO
+- PX4 `COMMAND_ACK` messages (`msgid 77`) observed for ARM and DISARM
+- `COMMAND_ACK` messages successfully forwarded through DRACO back to QGroundControl
+- Stopping DRACO caused QGroundControl to enter `Comms Lost`
+- Restarting DRACO restored QGroundControl communication and returned it to `Ready`
 
-## Verified current data path
+## Verified Data Path
 
 ```mermaid
 flowchart LR
-    EXT["External / GCS-facing UDP path"]
-    GCS["DRACO GCS-facing socket\nUDP :14560"]
-    PX4SIDE["DRACO PX4-facing socket\nUDP :14550"]
-    PX4["PX4 SITL\nMAVLink UDP :18570"]
+    QGC["QGroundControl<br/>Windows GCS"]
+    GCS["DRACO GCS-facing socket<br/>UDP :14560"]
+    PX4SIDE["DRACO PX4-facing socket<br/>UDP :14550"]
+    PX4["PX4 SITL + Gazebo X500<br/>MAVLink UDP :18570"]
 
-    EXT <--> GCS
+    QGC <--> GCS
     GCS <--> PX4SIDE
     PX4SIDE <--> PX4
 ```
 
-The current PX4 SITL configuration used during testing reported:
+The tested communication path is:
+
+```text
+QGroundControl
+      ↕
+DRACO UDP :14560
+      ↕
+DRACO UDP :14550
+      ↕
+PX4 SITL UDP :18570
+```
+
+## PX4 SITL Configuration
+
+During testing, the active PX4 MAVLink instance reported:
 
 ```text
 mode: Normal
@@ -50,28 +80,84 @@ MAVLink version: 2
 transport protocol: UDP (18570, remote port: 14550)
 ```
 
-## Live MAVLink verification
+## MAVLink 2 Inspection
 
-DRACO has received varying live UDP datagram sizes from PX4 and inspected the MAVLink 2 header directly. Examples observed during development include frames where:
+DRACO currently performs basic inspection of live MAVLink 2 headers. The following header fields have been extracted from real PX4 traffic:
 
 ```text
-first byte     = 0xFD
-payload length = extracted from byte 1
-system ID      = extracted from byte 5
-component ID   = extracted from byte 6
-message ID     = reconstructed from bytes 7-9
+Byte 0      → MAVLink magic byte
+Byte 1      → Payload length
+Byte 4      → Sequence number
+Byte 5      → System ID
+Byte 6      → Component ID
+Bytes 7–9   → 24-bit Message ID
 ```
 
-For unsigned MAVLink 2 frames observed during testing, the measured datagram size also matched the expected relationship:
+MAVLink 2 frames were identified using `0xFD` as the first byte.
+
+The 24-bit MAVLink message ID is reconstructed from the three little-endian header bytes:
+
+```text
+message_id = byte[7] | byte[8] << 8 | byte[9] << 16
+```
+
+For unsigned MAVLink 2 frames observed during testing, datagram sizes matched:
 
 ```text
 10-byte MAVLink 2 header
 + payload
 + 2-byte checksum
-= received frame size
+= frame size
 ```
 
-## Repository layout
+## Command Path Verification
+
+A harmless ARM/DISARM test was performed through the complete gateway path.
+
+Observed DRACO output included:
+
+```text
+Message ID:77
+Command_ack forwarded to GCS
+```
+
+for both ARM and DISARM operations. MAVLink message ID `77` corresponds to `COMMAND_ACK`.
+
+The verified command path was therefore:
+
+```text
+QGroundControl
+      ↓
+DRACO
+      ↓
+PX4
+      ↓
+COMMAND_ACK
+      ↓
+DRACO
+      ↓
+QGroundControl
+```
+
+## Gateway Dependency Test
+
+To verify that QGroundControl was not accidentally communicating directly with PX4, DRACO was stopped while QGroundControl and PX4 SITL remained running.
+
+QGroundControl transitioned to:
+
+```text
+Comms Lost
+```
+
+After DRACO was restarted, QGroundControl recovered and returned to:
+
+```text
+Ready
+```
+
+This confirms that the tested Ground Control Station communication path depends on DRACO being active.
+
+## Repository Layout
 
 ```text
 .
@@ -88,9 +174,15 @@ For unsigned MAVLink 2 frames observed during testing, the measured datagram siz
     └── CHANGELOG.md
 ```
 
-## Documentation policy
+## Current Development State
 
-Public documentation is deliberately limited to completed implementation, confirmed observations, and reproducible current-state notes. Unimplemented research mechanisms, detailed future phases, and unpublished experiment plans are not maintained in this public repository.
+The transport foundation and transparent real-GCS communication path have been completed. DRACO can currently receive MAVLink traffic, forward it to PX4 SITL, receive telemetry and command responses, and return those frames to QGroundControl while remaining transparently in path.
+
+Further research mechanisms are intentionally not described in the public repository until they have been implemented and experimentally verified.
+
+## Documentation Policy
+
+Public documentation is deliberately limited to completed implementation, verified observations, reproducible current-state behavior, and experimentally demonstrated milestones. Unimplemented research mechanisms, future experimental phases, and unpublished design details are intentionally kept outside the public repository.
 
 ## License
 
