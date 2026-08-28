@@ -1,165 +1,96 @@
-# DRACO — Context-Aware MAVLink Security Gateway
+# DRACO — UAV-Side MAVLink Security Gateway
 
-DRACO is a research prototype for **credential-valid, mission-intent- and state-aware authorization of MAVLink commands at the UAV boundary**.
+DRACO is an active research prototype built around a C++ UDP gateway between a Ground Control Station path and PX4 SITL.
 
-The project is no longer framed as a custom secure MAVLink tunnel or a replacement cryptographic protocol. Existing mechanisms already cover transport protection, message signing, identity, and basic protocol authorization. DRACO instead studies a harder question:
-
-> If a command is syntactically valid and comes from an authenticated or credential-compromised GCS, should that command still be allowed to reach PX4 in the aircraft's current mission and physical context?
+This public repository intentionally documents **only work that has already been implemented or directly verified**. Detailed future research phases and unpublished design ideas are kept out of the public repository while development is ongoing.
 
 ## Current implementation status
 
-The repository currently contains a working C++ **bidirectional UDP gateway foundation**:
+The following work has been completed and tested:
 
-- GCS-facing UDP socket;
-- PX4-facing UDP socket;
-- `poll()`-based multiplexing of both directions;
-- GCS → DRACO → PX4 forwarding;
-- PX4 → DRACO → GCS forwarding;
-- return-endpoint tracking for the current GCS test client; and
-- a minimal `main.cpp` that launches the gateway.
+- C++ project builds successfully under Ubuntu 24.04 on WSL2;
+- minimal `main.cpp` entry point launches the gateway;
+- separate `udp_gateway.cpp` contains the network gateway logic;
+- GCS-facing IPv4 UDP socket created and bound;
+- PX4-facing IPv4 UDP socket created and bound;
+- `poll()` used to monitor both sockets in one thread;
+- GCS → DRACO → PX4-side forwarding implemented;
+- PX4-side → DRACO → remembered GCS endpoint forwarding implemented;
+- complete bidirectional UDP round-trip verified with local test endpoints;
+- compiled `draco` binary excluded through `.gitignore`;
+- PX4-Autopilot SITL installed and built;
+- Gazebo X500 simulation launched successfully;
+- active PX4 MAVLink UDP instance inspected with `mavlink status`;
+- DRACO PX4-facing socket connected to the real PX4 SITL MAVLink path;
+- live PX4 UDP traffic received by DRACO;
+- MAVLink 2 framing confirmed from live traffic using the `0xFD` magic byte;
+- payload length inspected from live MAVLink frames;
+- 24-bit MAVLink message IDs reconstructed from the live header;
+- MAVLink system ID, component ID, and sequence number inspected.
 
-The gateway has been tested end-to-end with local UDP endpoints. PX4 SITL with Gazebo X500 is also running and is the next integration target.
-
-## Research architecture
-
-```mermaid
-flowchart LR
-    GCS[Ground Control Station / MAVSDK] -->|Standard MAVLink 2| IN[DRACO MAVLink Ingress]
-
-    subgraph DRACO[DRACO IntentGuard]
-        IN --> PARSE[MAVLink Parser & Semantic Classifier]
-        PARSE --> POLICY[Context-Aware Policy Engine]
-
-        MISSION[Mission Intent & Revision Store] --> POLICY
-        STATE[Fresh PX4 State Cache] --> POLICY
-        HISTORY[Temporal Command History] --> POLICY
-        CONTROL[Control / Safety Constraints] --> POLICY
-
-        POLICY --> DECISION{ALLOW / DENY / DEFER}
-        DECISION -->|ALLOW| OUT[Forward MAVLink Unchanged]
-        DECISION -->|DENY / DEFER| LOG[Evidence Log]
-
-        OUT --> EFFECT[Command Effect Contract]
-        EFFECT --> OUTCOME[Causal Outcome Tracker]
-        OUTCOME --> LOG
-    end
-
-    OUT -->|Standard MAVLink 2| PX4[PX4]
-    PX4 -->|Telemetry / ACK / state| STATE
-    PX4 -->|Observed outcome| OUTCOME
-```
-
-DRACO does **not** replace PX4's stabilization, navigator, or failsafe logic. PX4 remains the flight controller. DRACO only mediates whether externally supplied control traffic deserves to reach PX4.
-
-## Core research mechanisms
-
-### 1. Mission Intent Contract
-
-An approved mission is represented as a committed revision with constraints such as operational area, altitude envelope, permitted modes, mission-update policy, and parameter profile. Sensitive commands are evaluated against the active mission revision rather than against a generic allowlist.
-
-```mermaid
-flowchart TD
-    M[Approved Mission] --> C[Canonicalize]
-    C --> H[Mission Hash]
-    H --> R[Mission Revision Rn]
-    R --> D[Future mission change]
-    D --> P{Parent revision = current revision?}
-    P -->|No| X[Reject stale/conflicting revision]
-    P -->|Yes| E[Evaluate mission delta]
-```
-
-### 2. Evidence-aware command authorization
-
-Sensitive operations are evaluated using fresh local evidence.
-
-```mermaid
-flowchart TD
-    CMD[Credential-valid MAVLink command] --> S[Structural / semantic parse]
-    S --> F{State evidence fresh?}
-    F -->|No| DEFER[DEFER or DENY by risk class]
-    F -->|Yes| I{Consistent with mission intent?}
-    I -->|No| DENY[DENY]
-    I -->|Yes| C{Inside control / safety envelope?}
-    C -->|No| DENY
-    C -->|Yes| T{Temporal interaction safe?}
-    T -->|No| DENY
-    T -->|Yes| ALLOW[ALLOW and forward unchanged]
-```
-
-The initial protected operation families are:
-
-- mission changes;
-- parameter writes; and
-- external position/setpoint commands.
-
-### 3. Temporal Command Interaction Window
-
-DRACO will not treat every sensitive command as independent. Recent changes are retained so individually legitimate operations can be assessed as a potentially dangerous sequence, especially for controller-, estimator-, failsafe-, or navigation-critical parameters.
-
-### 4. Command Effect Contract
-
-For selected accepted commands, DRACO records the expected PX4-side effect and verifies the later result.
-
-```mermaid
-sequenceDiagram
-    participant G as GCS
-    participant D as DRACO
-    participant P as PX4
-
-    G->>D: Valid sensitive command
-    D->>D: Evaluate mission + state + control context
-    D->>P: Forward after ALLOW
-    D->>D: Register expected effect
-    P-->>D: COMMAND_ACK / telemetry / state transition
-    D->>D: CONFIRMED / FAILED / MISMATCH / UNEXPLAINED
-```
-
-This allows DRACO to ask not only **"was the command permitted?"** but also **"was the later aircraft behavior causally explainable?"**
-
-## Threat model in one sentence
-
-The primary adversary is an **authenticated or credential-valid endpoint that can send well-formed MAVLink commands with unsafe cyber-physical meaning**.
-
-Ordinary unsigned injection, replay, transport confidentiality, and key management remain relevant engineering concerns, but they are not the headline research novelty.
-
-## Near-term development flow
+## Verified current data path
 
 ```mermaid
 flowchart LR
-    A[Bidirectional UDP gateway ✓] --> B[PX4 SITL real MAVLink passthrough]
-    B --> C[MAVLink parser / classifier]
-    C --> D[Fresh PX4 state cache]
-    D --> E[Mission Intent Contract]
-    E --> F[ALLOW / DENY / DEFER engine]
-    F --> G[Mission + Parameter + Setpoint protections]
-    G --> H[Temporal command interactions]
-    H --> I[Command Effect Contracts]
-    I --> J[Credential-valid attack benchmark]
-    J --> K[Security + latency + FPR evaluation]
+    EXT["External / GCS-facing UDP path"]
+    GCS["DRACO GCS-facing socket\nUDP :14560"]
+    PX4SIDE["DRACO PX4-facing socket\nUDP :14550"]
+    PX4["PX4 SITL\nMAVLink UDP :18570"]
+
+    EXT <--> GCS
+    GCS <--> PX4SIDE
+    PX4SIDE <--> PX4
 ```
 
-Target: complete the project implementation and experimental harness by **30 September 2026**.
+The current PX4 SITL configuration used during testing reported:
+
+```text
+mode: Normal
+MAVLink version: 2
+transport protocol: UDP (18570, remote port: 14550)
+```
+
+## Live MAVLink verification
+
+DRACO has received varying live UDP datagram sizes from PX4 and inspected the MAVLink 2 header directly. Examples observed during development include frames where:
+
+```text
+first byte     = 0xFD
+payload length = extracted from byte 1
+system ID      = extracted from byte 5
+component ID   = extracted from byte 6
+message ID     = reconstructed from bytes 7-9
+```
+
+For unsigned MAVLink 2 frames observed during testing, the measured datagram size also matched the expected relationship:
+
+```text
+10-byte MAVLink 2 header
++ payload
++ 2-byte checksum
+= received frame size
+```
 
 ## Repository layout
 
 ```text
 .
-├── main.cpp                 # Minimal program entry point
-├── udp_gateway.cpp          # Current bidirectional UDP gateway
+├── main.cpp
+├── udp_gateway.cpp
 ├── .gitignore
 ├── LICENSE
 └── docs/
+    ├── README.md
     ├── system-architecture.md
     ├── protocol-design.md
     ├── threat-model.md
     ├── development-roadmap.md
-    ├── CHANGELOG.md
-    └── README.md
+    └── CHANGELOG.md
 ```
 
-## Important scope boundaries
+## Documentation policy
 
-DRACO is not intended to become a flight controller, custom cryptographic protocol, generic machine-learning IDS, or RF/GNSS anti-spoofing system. The first research prototype is focused on the raw MAVLink/PX4 command boundary and on the gap between **valid command syntax/credentials** and **safe mission-context meaning**.
+Public documentation is deliberately limited to completed implementation, confirmed observations, and reproducible current-state notes. Unimplemented research mechanisms, detailed future phases, and unpublished experiment plans are not maintained in this public repository.
 
 ## License
 
