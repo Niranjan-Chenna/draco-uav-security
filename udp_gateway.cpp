@@ -8,6 +8,7 @@
 #include <poll.h>
 #include "mavlink_parser.h"
 #include "semantic_classifier.h"
+#include "state_cache.h"
 void run_gateway () {
     using namespace std;
     int sockfd = socket(AF_INET,SOCK_DGRAM,0); //// create ipv4 udp socket
@@ -66,6 +67,8 @@ void run_gateway () {
         &px4_target_addr.sin_addr
     );
 
+    StateCache state_cache{};// creating an instance of StateCache to store the state of the vehicle
+    
     pollfd fds[2]{};// creating an array of pollfd structures to monitor multiple file descriptors for events
     //GCS facing socket 
     fds[0].fd = sockfd; 
@@ -80,7 +83,7 @@ void run_gateway () {
     socklen_t px4_sender_len=sizeof(px4_sender_addr);
 
    while (true) {
-    int ready=poll(fds,2,-1);
+    int ready=poll(fds,2,100);
 
     if (ready == -1) {
     cout << "poll failed: " << strerror(errno) << endl;
@@ -112,6 +115,7 @@ void run_gateway () {
         reinterpret_cast<const uint8_t*>(buffer),
         static_cast<size_t>(bytes_received),
         MavlinkDirection::GCS_TO_PX4
+
     );
 
     for (const auto& parsed : parsed_message) {
@@ -197,7 +201,9 @@ void run_gateway () {
             );
             for (const auto& parsed : parsed_message) {
                 const auto& msg = parsed.message;
-               
+                update_state_cache(state_cache, parsed);
+
+             
             cout << "Library MAVLink:"
              << " msgid=" << msg.msgid
              << " sysid=" << static_cast<int>(msg.sysid)
@@ -237,6 +243,8 @@ if (bytes_sent_to_gcs == -1) {
 }
     }
     }
+
+refresh_state_freshness(state_cache);
 
 
 }
