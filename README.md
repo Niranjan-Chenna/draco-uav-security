@@ -6,13 +6,14 @@ This public repository intentionally documents **only work that has already been
 
 ## Current Implementation Status
 
-Three implementation milestones have been completed and directly verified:
+Four implementation milestones have been completed and directly verified:
 
 - Phase 0 — Transport Foundation ✅
 - Phase 1 — Transparent QGroundControl ↔ DRACO ↔ PX4 SITL Path ✅
 - Phase 2 — MAVLink Parsing and Semantic Classification ✅
+- Phase 3 — Trusted PX4 Evidence and Security Context ✅
 
-DRACO currently provides a transparent bidirectional MAVLink path while also parsing and classifying observed traffic without re-encoding the forwarded frames.
+DRACO currently provides a transparent bidirectional MAVLink path while parsing and classifying observed traffic, maintaining a PX4-derived evidence cache, tracking evidence freshness, and creating frozen evidence snapshots without re-encoding the forwarded frames.
 
 ## Verified Data Path
 
@@ -21,12 +22,14 @@ flowchart LR
     QGC["QGroundControl<br/>Windows GCS"]
     GCS["DRACO GCS-facing socket<br/>UDP :14560"]
     PARSER["MAVLink parser +<br/>semantic classifier"]
+    CACHE["PX4 evidence<br/>StateCache"]
     PX4SIDE["DRACO PX4-facing socket<br/>UDP :14550"]
     PX4["PX4 SITL + Gazebo X500<br/>MAVLink UDP :18570"]
 
     QGC <--> GCS
     GCS --> PARSER
     PARSER --> GCS
+    PARSER --> CACHE
     GCS <--> PX4SIDE
     PX4SIDE <--> PX4
 ```
@@ -43,7 +46,7 @@ DRACO UDP :14550
 PX4 SITL UDP :18570
 ```
 
-Parsing and classification observe the received MAVLink traffic, while forwarding continues to use the original received byte buffer.
+Parsing, classification and state observation operate alongside the transport path. Forwarding continues to use the original received byte buffer rather than a reconstructed MAVLink frame.
 
 ## Phase 0 — Transport Foundation
 
@@ -213,9 +216,124 @@ parsed messages: 0
 
 This confirms that incomplete input is not promoted into a valid `ParsedMavlinkMessage`.
 
+## Phase 3 — Trusted PX4 Evidence and Security Context
+
+Phase 3 adds a dedicated PX4-derived evidence layer implemented in:
+
+```text
+state_cache.h
+state_cache.cpp
+```
+
+The cache is updated from parsed PX4 → GCS traffic and stores both evidence values and security-relevant metadata.
+
+### Cached Evidence
+
+The current `StateCache` includes:
+
+- armed/disarmed state derived from PX4 heartbeat evidence
+- MAVLink base mode, PX4 custom mode and system status
+- decoded PX4 control mode fields and an offboard-active indicator
+- landed/airborne state from `EXTENDED_SYS_STATE`
+- global latitude, longitude, altitude, relative altitude and NED velocity components from `GLOBAL_POSITION_INT`
+- local NED position and velocity from `LOCAL_POSITION_NED`
+- mission sequence, total mission items and mission state from `MISSION_CURRENT`
+- a conservative failsafe indicator derived from PX4 heartbeat system status
+- system-health bitmasks from `SYS_STATUS`
+- estimator flags and consistency ratios from `ESTIMATOR_STATUS`
+
+Global and local position are intentionally retained separately because they serve different evidence roles. Raw MAVLink units are preserved in the cache, including millimetres and centimetres per second for `GLOBAL_POSITION_INT` and metres/metres per second for `LOCAL_POSITION_NED`.
+
+### Evidence Metadata
+
+Each cached evidence field carries:
+
+```text
+value
+source_sysid
+source_compid
+observed_at
+age
+valid
+freshness
+```
+
+Security timekeeping uses `std::chrono::steady_clock`, providing a monotonic clock that is not affected by wall-clock changes.
+
+Freshness states are represented explicitly as:
+
+```text
+FRESH
+STALE
+INVALID
+UNKNOWN
+```
+
+A generic freshness helper applies the same metadata rule across all evidence-field value types. The current prototype freshness threshold is 3000 ms.
+
+The gateway `poll()` timeout is 100 ms so freshness can continue to advance even when no network packet arrives. This allows evidence to transition from `FRESH` to `STALE` when the PX4 source becomes silent rather than leaving cached evidence fresh indefinitely.
+
+A live stale-state test produced:
+
+```text
+local_freshness=0 age_ms=0
+local_freshness=1 age_ms=3041
+```
+
+### Evidence Usability
+
+A shared helper defines the current evidence-usability invariant:
+
+```text
+valid == true AND freshness == FRESH → usable
+otherwise                             → not usable
+```
+
+Unit-test output verified:
+
+```text
+unknown usable: 0
+fresh usable: 1
+stale usable: 0
+invalid usable: 0
+```
+
+This prevents unknown, stale or invalid evidence from being silently treated as trustworthy.
+
+### Evidence Snapshot
+
+Phase 3 also introduces `EvidenceSnapshot`.
+
+A snapshot copies the current `StateCache`, records a monotonic capture time and refreshes freshness on the copied evidence. The intended use is to provide one frozen evidence view for a single security decision instead of reading a live cache that may change between individual field accesses.
+
+A unit test verified that the live cache can change while the snapshot remains unchanged:
+
+```text
+live armed: 1
+snapshot armed: 0
+```
+
+### Verified Live Evidence
+
+Live PX4 SITL/QGroundControl testing directly verified:
+
+- ARM → DISARM state changes
+- PX4 base/custom/system-status updates
+- landed-state transition through takeoff and landing
+- global position, local position, altitude and velocity changes
+- mission-state decoding with no mission stored
+- mission-state decoding after uploading a five-item QGroundControl mission
+- control/offboard-state decoding
+- system-health updates
+- estimator-status updates
+- `FRESH` → `STALE` transition when PX4 telemetry stops
+- snapshot immutability after the live cache changes
+
+The final integration smoke test kept the transparent QGroundControl ↔ DRACO ↔ PX4 path operational through normal flight activity including arming, takeoff, movement, landing and disarming while the Phase 3 evidence layer remained active.
+
 ## Command Path Verification
 
-The final Phase 2 regression test exercised ARM and DISARM through the complete gateway path:
+The current regression path remains:
 
 ```text
 QGroundControl
@@ -226,16 +344,18 @@ MAVLink parser
       ↓
 semantic classifier
       ↓
+PX4-derived evidence observation
+      ↓
 original frame forwarded to PX4
       ↓
-PX4 COMMAND_ACK
+PX4 response / telemetry
       ↓
 DRACO
       ↓
 QGroundControl
 ```
 
-QGroundControl remained connected and PX4 returned `COMMAND_ACK` (`msgid 77`) for both operations.
+Evidence observation does not replace or re-encode the forwarded MAVLink frame.
 
 ## Repository Layout
 
@@ -247,8 +367,11 @@ QGroundControl remained connected and PX4 returned `COMMAND_ACK` (`msgid 77`) fo
 ├── mavlink_parser.cpp
 ├── semantic_classifier.h
 ├── semantic_classifier.cpp
+├── state_cache.h
+├── state_cache.cpp
 ├── tests/
-│   └── parser_test.cpp
+│   ├── parser_test.cpp
+│   └── state_cache_test.cpp
 ├── .gitignore
 ├── LICENSE
 ├── README.md
@@ -263,7 +386,7 @@ QGroundControl remained connected and PX4 returned `COMMAND_ACK` (`msgid 77`) fo
 
 ## Current Development State
 
-DRACO now has a verified transparent real-GCS MAVLink path plus direction-aware protocol parsing and semantic classification.
+DRACO now has a verified transparent real-GCS MAVLink path, direction-aware protocol parsing, semantic classification and a PX4-derived evidence layer with freshness and snapshot semantics.
 
 The current public implementation can:
 
@@ -275,9 +398,14 @@ The current public implementation can:
 - decode `COMMAND_LONG` and `COMMAND_INT`
 - map recognized commands and write operations into semantic operations
 - identify selected PX4-originated state-evidence messages
+- cache armed, mode, landed, position, velocity, mission, health and estimator evidence
+- retain source system/component identifiers and monotonic observation timestamps
+- track evidence age and `FRESH`/`STALE`/`INVALID`/`UNKNOWN` state
+- reject unknown, stale or invalid evidence from the shared usability helper
+- create immutable per-decision evidence snapshots
 - conservatively label unclassified GCS-side traffic
 - reject incomplete input from the parsed-message output
-- preserve the live QGroundControl ↔ PX4 command and telemetry path while classification is active
+- preserve the live QGroundControl ↔ PX4 command and telemetry path while observation is active
 
 Further research mechanisms are intentionally not described in the public repository until they have been implemented and experimentally verified.
 
