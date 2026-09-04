@@ -1,3 +1,37 @@
+# main binaries
 draco
 parser_test
 state_cache_test
+
+# phase 4 test binaries
+tests/test_mission_delta
+tests/test_mission_intent_contract
+tests/test_mission_revision_causality
+tests/test_mission_authorization
+tests/test_mission_change_budget
+tests/test_phase4_research_freeze
+mission_delta_test
+mission_intent_contract_test
+mission_revision_causality_test
+# compiler artifacts
+*.o
+*.out
+*.a
+*.so
+
+# crash dumps
+core
+core.*
+*.core
+
+# temporary logs
+*.log
+
+# generated evaluation data
+evaluation/results/raw/
+
+# editor / os files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
