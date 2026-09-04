@@ -29,6 +29,12 @@ core.*
 
 # generated evaluation data
 evaluation/results/raw/
+build/
+config/*.secret
+config/local/
+__pycache__/
+*.pyc
+Draco-Private/
 
 # editor / os files
 .vscode/

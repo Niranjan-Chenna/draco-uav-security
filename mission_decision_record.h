@@ -7,8 +7,19 @@
 #include "mission_revision_causality.h"
 #include "state_cache.h"
 #include "mission_change_budget.h"
+#include "principal_context.h"
+#include "evaluation_mode.h"
 
 struct MissionDecisionRecord {
+    PrincipalContext principal;
+    EvaluationMode evaluation_mode{EvaluationMode::FULL_DRACO};
+    std::string scenario_id;
+    std::string current_revision_hash;
+    double canonicalization_latency_us{0};
+    double mission_hash_latency_us{0};
+    double semantic_delta_latency_us{0};
+    double policy_latency_us{0};
+    double decision_latency_us{0};
     MissionProposalRecord proposal;
     uint64_t contract_id{0};
     uint32_t contract_version{0};

@@ -7,6 +7,7 @@
 #include "mission_intent_contract.h"
 #include "mission_revision_causality.h"
 #include "mission_change_budget.h"
+#include "evaluation_mode.h"
 
 enum class MissionAuthorizationDecision {
     ALLOW,
@@ -31,7 +32,8 @@ MissionAuthorizationResult evaluate_mission_authorization(
     const MissionIntentContract& contract,
     MissionAuthorityTier authority,
     bool vehicle_in_flight,
-    uint64_t current_unix_ms
+    uint64_t current_unix_ms,
+    EvaluationMode mode = EvaluationMode::FULL_DRACO
 );
 
 const char* mission_authorization_decision_name(

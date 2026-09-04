@@ -12,6 +12,7 @@ enum class MavlinkDirection {
 struct ParsedMavlinkMessage {
     mavlink_message_t message;
     MavlinkDirection direction;
+    std::vector<uint8_t> wire_bytes;
 };
 
 std::vector<ParsedMavlinkMessage> parse_mavlink_data(

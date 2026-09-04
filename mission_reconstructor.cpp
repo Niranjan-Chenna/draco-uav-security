@@ -1,7 +1,5 @@
 #include "mission_reconstructor.h"
 
-#include "mission_reconstructor.h"
-
 void start_mission_upload(
     MissionUploadTransaction& transaction,
     const mavlink_mission_count_t& count

@@ -129,10 +129,12 @@ void update_state_cache(
     cache.landed_state.observed_at =
         observed_now;
 
-    cache.landed_state.valid = true;
+    cache.landed_state.valid =
+        extended_state.landed_state >= MAV_LANDED_STATE_ON_GROUND &&
+        extended_state.landed_state <= MAV_LANDED_STATE_LANDING;
 
     cache.landed_state.freshness =
-        EvidenceFreshness::FRESH;
+        cache.landed_state.valid ? EvidenceFreshness::FRESH : EvidenceFreshness::INVALID;
 
 }
     if (parsed.message.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT) {
@@ -177,9 +179,11 @@ void update_state_cache(
     cache.global_position.observed_at =
         observed_now;
 
-    cache.global_position.valid = true;
+    cache.global_position.valid =
+        global_position.lat >= -900000000 && global_position.lat <= 900000000 &&
+        global_position.lon >= -1800000000 && global_position.lon <= 1800000000;
     cache.global_position.freshness =
-        EvidenceFreshness::FRESH;
+        cache.global_position.valid ? EvidenceFreshness::FRESH : EvidenceFreshness::INVALID;
 }
 if (parsed.message.msgid == MAVLINK_MSG_ID_LOCAL_POSITION_NED) {
 

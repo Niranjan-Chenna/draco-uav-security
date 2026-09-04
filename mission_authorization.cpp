@@ -80,11 +80,12 @@ MissionAuthorizationResult evaluate_mission_authorization(
     const MissionIntentContract& contract,
     MissionAuthorityTier authority,
     bool vehicle_in_flight,
-    uint64_t current_unix_ms
+    uint64_t current_unix_ms,
+    EvaluationMode mode
 ) {
 
     // no trusted contract has been provisioned
-    if (contract.contract_id == 0) {
+    if (mode != EvaluationMode::NO_INTENT && contract.contract_id == 0) {
 
         return {
             MissionAuthorizationDecision::DEFER,
@@ -94,7 +95,7 @@ MissionAuthorizationResult evaluate_mission_authorization(
 
 
     // invalid policy must fail closed
-    if (!validate_mission_intent_contract(contract)) {
+    if (mode != EvaluationMode::NO_INTENT && !validate_mission_intent_contract(contract)) {
 
         return {
             MissionAuthorizationDecision::DEFER,
@@ -103,7 +104,7 @@ MissionAuthorizationResult evaluate_mission_authorization(
     }
 
 
-    if (!contract_valid_at(
+    if (mode != EvaluationMode::NO_INTENT && !contract_valid_at(
             contract,
             current_unix_ms
         )) {
@@ -111,19 +112,6 @@ MissionAuthorizationResult evaluate_mission_authorization(
         return {
             MissionAuthorizationDecision::DEFER,
             "INTENT_CONTRACT_NOT_CURRENTLY_VALID"
-        };
-    }
-
-
-    // exact current mission re-upload
-    if (
-        causality.classification ==
-        RevisionCausalityClass::NO_OP_REUPLOAD
-    ) {
-
-        return {
-            MissionAuthorizationDecision::ALLOW,
-            "NO_OP_REUPLOAD"
         };
     }
 
@@ -203,6 +191,11 @@ MissionAuthorizationResult evaluate_mission_authorization(
         };
     }
 
+
+    // this branch is selected only by the explicit evaluation orchestration layer.
+    if (mode == EvaluationMode::NO_INTENT) {
+        return {MissionAuthorizationDecision::ALLOW, "EVALUATION_INTENT_DISABLED"};
+    }
 
     // normal mission replanning may be disabled while airborne
     if (
@@ -390,6 +383,19 @@ MissionAuthorizationResult evaluate_mission_authorization(
                 "MISSION_CORRIDOR_VIOLATION"
             };
         }
+    }
+
+
+    // exact current mission re-upload
+    if (
+        causality.classification ==
+        RevisionCausalityClass::NO_OP_REUPLOAD
+    ) {
+
+        return {
+            MissionAuthorizationDecision::ALLOW,
+            "NO_OP_REUPLOAD"
+        };
     }
 
 
