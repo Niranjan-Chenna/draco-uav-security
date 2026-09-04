@@ -1,40 +1,77 @@
-# DRACO — UAV-Side MAVLink Security Gateway
+# DRACO — UAV-Side MAVLink Mission-Revision Security Gateway
 
-DRACO is an active research prototype built around a C++ UDP gateway placed transparently between QGroundControl and PX4 SITL.
+DRACO is a C++ research prototype that sits between a Ground Control Station (GCS) and PX4 SITL and mediates MAVLink traffic before mission revisions reach the flight controller.
 
-This public repository intentionally documents **only work that has already been implemented or directly verified**. Detailed future research phases and unpublished design ideas are kept out of the public repository while development is ongoing.
+The current implementation has completed the Phase 4 mission-revision security core. DRACO now reconstructs proposed missions, canonicalizes them, compares them against committed mission history, evaluates semantic change and revision causality, checks an independently provisioned mission-intent policy, binds the decision to fresh PX4-derived evidence, and only forwards an authorized mission to PX4 through a separate DRACO→PX4 upload transaction.
 
-## Current Implementation Status
+This repository documents implemented and directly tested behavior. Full paper-scale evaluation is not yet complete.
 
-Four implementation milestones have been completed and directly verified:
+## Current Status
 
-- Phase 0 — Transport Foundation ✅
-- Phase 1 — Transparent QGroundControl ↔ DRACO ↔ PX4 SITL Path ✅
-- Phase 2 — MAVLink Parsing and Semantic Classification ✅
-- Phase 3 — Trusted PX4 Evidence and Security Context ✅
+Completed and verified milestones:
 
-DRACO currently provides a transparent bidirectional MAVLink path while parsing and classifying observed traffic, maintaining a PX4-derived evidence cache, tracking evidence freshness, and creating frozen evidence snapshots without re-encoding the forwarded frames.
+- Phase 0 — UDP transport foundation ✅
+- Phase 1 — transparent QGroundControl ↔ DRACO ↔ PX4 SITL path ✅
+- Phase 2 — MAVLink parsing and semantic classification ✅
+- Phase 3 — PX4-derived state evidence, freshness and snapshots ✅
+- Phase 4 — mission-revision security core, Tasks 1–11 ✅
+
+Phase 4 research semantics are now frozen. Ongoing work on the `codex-evaluation` branch is limited to implementation cleanup, replacement of temporary SITL placeholders, automated benign/adversarial evaluation, baselines, ablations, metrics, result logging and packaging. It must not redefine the frozen security semantics.
+
+## Security Goal
+
+DRACO addresses a gap that packet freshness or protocol-validity checks alone do not solve: a fresh, syntactically valid and potentially credential-valid mission revision can still violate the currently committed mission intent.
+
+The protected mission path is:
+
+```text
+GCS mission proposal
+        ↓
+DRACO buffers/terminates the GCS mission upload
+        ↓
+mission reconstruction
+        ↓
+canonical mission
+        ↓
+semantic delta
+        ↓
+revision lineage / causality
+        ↓
+intent contract
+        ↓
+change budget + authority policy
+        ↓
+fresh PX4 evidence
+        ↓
+ALLOW / DENY / DEFER / REQUIRE_HIGHER_AUTHORITY
+        ↓
+only ALLOW starts a separate DRACO → PX4 mission upload
+        ↓
+PX4 MISSION_ACK
+        ↓
+commit revision only after PX4 accepts it
+```
+
+A rejected or deferred proposal must not replace the mission already committed in PX4.
 
 ## Verified Data Path
 
 ```mermaid
 flowchart LR
-    QGC["QGroundControl<br/>Windows GCS"]
-    GCS["DRACO GCS-facing socket<br/>UDP :14560"]
-    PARSER["MAVLink parser +<br/>semantic classifier"]
-    CACHE["PX4 evidence<br/>StateCache"]
-    PX4SIDE["DRACO PX4-facing socket<br/>UDP :14550"]
-    PX4["PX4 SITL + Gazebo X500<br/>MAVLink UDP :18570"]
+    QGC["QGroundControl / MAVLink client"]
+    GCS["DRACO GCS-facing UDP :14560"]
+    CORE["Parser + mission reconstruction + security decision"]
+    PX4SIDE["DRACO PX4-facing UDP :14550"]
+    PX4["PX4 SITL / Gazebo X500 UDP :18570"]
 
     QGC <--> GCS
-    GCS --> PARSER
-    PARSER --> GCS
-    PARSER --> CACHE
-    GCS <--> PX4SIDE
+    GCS --> CORE
+    CORE --> GCS
+    CORE <--> PX4SIDE
     PX4SIDE <--> PX4
 ```
 
-The tested communication path is:
+Tested topology:
 
 ```text
 QGroundControl
@@ -46,83 +83,28 @@ DRACO UDP :14550
 PX4 SITL UDP :18570
 ```
 
-Parsing, classification and state observation operate alongside the transport path. Forwarding continues to use the original received byte buffer rather than a reconstructed MAVLink frame.
-
-## Phase 0 — Transport Foundation
-
-The following transport work has been implemented and tested:
-
-- C++ project builds successfully under Ubuntu 24.04 on WSL2
-- Minimal `main.cpp` entry point launches the gateway
-- Separate `udp_gateway.cpp` contains the UDP gateway logic
-- GCS-facing IPv4 UDP socket bound to UDP `:14560`
-- PX4-facing IPv4 UDP socket bound to UDP `:14550`
-- `poll()` monitors both sockets in a single thread
-- GCS → DRACO → PX4 forwarding implemented
-- PX4 → DRACO → remembered GCS endpoint forwarding implemented
-- Bidirectional UDP communication verified
-
-## Phase 1 — Transparent Real-GCS Path
-
-The transparent QGroundControl/PX4 path has been directly verified with PX4 SITL and Gazebo X500:
-
-- PX4-Autopilot SITL installed and built
-- Gazebo X500 simulation launched successfully
-- active PX4 MAVLink UDP instance inspected using `mavlink status`
-- DRACO connected to the real PX4 SITL MAVLink path
-- QGroundControl configured as the real Ground Control Station
-- genuine QGroundControl MAVLink traffic received by DRACO
-- QGroundControl packets forwarded unchanged to PX4 SITL
-- PX4 telemetry forwarded through DRACO back to QGroundControl
-- QGroundControl successfully discovered the simulated X500 through DRACO
-- normal heartbeat and telemetry display verified
-- ARM and DISARM commands successfully passed through DRACO
-- PX4 `COMMAND_ACK` messages (`msgid 77`) returned through DRACO
-- stopping DRACO caused QGroundControl to enter `Comms Lost`
-- restarting DRACO restored communication and returned QGroundControl to `Ready`
-
-During testing, the active PX4 MAVLink instance reported:
-
-```text
-mode: Normal
-MAVLink version: 2
-transport protocol: UDP (18570, remote port: 14550)
-```
+Non-mission traffic continues through the transparent gateway path. Normal mission uploads are intercepted and mediated by DRACO before PX4 sees the proposed mission.
 
 ## Phase 2 — MAVLink Parsing and Semantic Classification
 
-Phase 2 replaced manual header inspection with the generated MAVLink library parser and added a separate semantic classification layer.
+The generated MAVLink library parser is used instead of manual packet-header interpretation.
 
-### MAVLink Parser
-
-The parser is implemented in:
+Implemented modules:
 
 ```text
-mavlink_parser.h
-mavlink_parser.cpp
+mavlink_parser.h/.cpp
+semantic_classifier.h/.cpp
 ```
 
-Implemented behavior includes:
+The parser:
 
-- generated MAVLink headers from the PX4 build are used instead of hard-coded message numbers
-- incoming bytes are fed through the standard MAVLink parser
-- only frames reported as successfully framed are emitted as parsed messages
-- parsing is performed for both GCS → PX4 and PX4 → GCS traffic
-- each parsed frame carries an explicit direction tag
-- parsed metadata includes MAVLink message ID, system ID, component ID, sequence number and payload length
-- multiple complete MAVLink frames can be returned from an input buffer
-- original received bytes remain separate from parsed representations and are forwarded without re-encoding
+- parses both GCS→PX4 and PX4→GCS traffic
+- tags messages with direction
+- preserves the original received bytes separately from parsed representations
+- supports multiple complete MAVLink frames in an input buffer
+- rejects incomplete input from parsed-message output
 
-Directions are represented as:
-
-```text
-GCS_TO_PX4
-PX4_TO_GCS
-```
-
-### Message Families
-
-The semantic classifier groups recognized traffic into broad message families:
+Semantic message families include:
 
 ```text
 READ_ONLY
@@ -136,11 +118,7 @@ STATE_EVIDENCE
 OTHER
 ```
 
-PX4-originated state-evidence classification currently includes messages such as heartbeat, system status, attitude, attitude quaternion, global position, local position and extended system state.
-
-### Semantic Operations
-
-Recognized traffic is further translated into security-relevant semantic operations:
+Security-relevant operations include:
 
 ```text
 READ_ONLY
@@ -160,93 +138,29 @@ UNKNOWN_WRITE
 OTHER
 ```
 
-`COMMAND_LONG` and `COMMAND_INT` messages are decoded and their `MAV_CMD` values are mapped to semantic operations.
+## Phase 3 — Trusted PX4 Evidence
 
-Examples currently handled include:
-
-- `MAV_CMD_COMPONENT_ARM_DISARM` → `ARM` or `DISARM`
-- `MAV_CMD_NAV_TAKEOFF` → `TAKEOFF`
-- `MAV_CMD_NAV_LAND` → `LAND`
-- `MAV_CMD_NAV_RETURN_TO_LAUNCH` → `RTL`
-- `MAV_CMD_DO_SET_MODE` → `MODE_CHANGE`
-- `MAV_CMD_DO_REPOSITION` → `POSITION_TARGET`
-- `MAV_CMD_REQUEST_MESSAGE` → `READ_ONLY`
-
-Known parameter writes, mission-changing messages, position targets, mode changes and direct-control messages are also mapped independently of `COMMAND_LONG`/`COMMAND_INT`.
-
-Unrecognized commands inside command containers are conservatively classified as `UNKNOWN_WRITE`. After recognized harmless and read-only protocol traffic is handled, remaining unclassified GCS-side traffic is also currently labeled `UNKNOWN_WRITE` by the Phase 2 classifier. This is a classification result only; Phase 2 does not yet claim policy enforcement or command blocking.
-
-### Verified Live Classification
-
-ARM and DISARM were exercised through QGroundControl after the parser and classifier were integrated.
-
-Observed output included:
+Implemented modules:
 
 ```text
-GCS MAVLink: msgid=76 ... family=COMMAND operation=ARM
-Library MAVLink: msgid=77 ... family=ACK_OR_RESPONSE operation=ACK_OR_RESPONSE
-
-GCS MAVLink: msgid=76 ... family=COMMAND operation=DISARM
-Library MAVLink: msgid=77 ... family=ACK_OR_RESPONSE operation=ACK_OR_RESPONSE
+state_cache.h/.cpp
 ```
 
-This verifies that semantic observation did not break the command/response path.
+The state cache is updated only from PX4→GCS evidence and stores values together with source and freshness metadata.
 
-Normal QGroundControl service traffic was also observed and classified without treating known harmless messages as writes. Examples include:
+Evidence includes:
 
-```text
-HEARTBEAT     → OTHER
-PING          → OTHER
-REQUEST_EVENT → READ_ONLY
-```
+- armed/disarmed state
+- base/custom mode and system status
+- landed/airborne state
+- global and local position/velocity
+- mission state
+- control/offboard state
+- failsafe state
+- system health
+- estimator health
 
-### Incomplete-Frame Test
-
-A small parser test is kept in:
-
-```text
-tests/parser_test.cpp
-```
-
-The test supplies an intentionally incomplete MAVLink 2 frame to the parser. The verified result was:
-
-```text
-parsed messages: 0
-```
-
-This confirms that incomplete input is not promoted into a valid `ParsedMavlinkMessage`.
-
-## Phase 3 — Trusted PX4 Evidence and Security Context
-
-Phase 3 adds a dedicated PX4-derived evidence layer implemented in:
-
-```text
-state_cache.h
-state_cache.cpp
-```
-
-The cache is updated from parsed PX4 → GCS traffic and stores both evidence values and security-relevant metadata.
-
-### Cached Evidence
-
-The current `StateCache` includes:
-
-- armed/disarmed state derived from PX4 heartbeat evidence
-- MAVLink base mode, PX4 custom mode and system status
-- decoded PX4 control mode fields and an offboard-active indicator
-- landed/airborne state from `EXTENDED_SYS_STATE`
-- global latitude, longitude, altitude, relative altitude and NED velocity components from `GLOBAL_POSITION_INT`
-- local NED position and velocity from `LOCAL_POSITION_NED`
-- mission sequence, total mission items and mission state from `MISSION_CURRENT`
-- a conservative failsafe indicator derived from PX4 heartbeat system status
-- system-health bitmasks from `SYS_STATUS`
-- estimator flags and consistency ratios from `ESTIMATOR_STATUS`
-
-Global and local position are intentionally retained separately because they serve different evidence roles. Raw MAVLink units are preserved in the cache, including millimetres and centimetres per second for `GLOBAL_POSITION_INT` and metres/metres per second for `LOCAL_POSITION_NED`.
-
-### Evidence Metadata
-
-Each cached evidence field carries:
+Each field tracks:
 
 ```text
 value
@@ -258,9 +172,7 @@ valid
 freshness
 ```
 
-Security timekeeping uses `std::chrono::steady_clock`, providing a monotonic clock that is not affected by wall-clock changes.
-
-Freshness states are represented explicitly as:
+Freshness states are:
 
 ```text
 FRESH
@@ -269,93 +181,346 @@ INVALID
 UNKNOWN
 ```
 
-A generic freshness helper applies the same metadata rule across all evidence-field value types. The current prototype freshness threshold is 3000 ms.
-
-The gateway `poll()` timeout is 100 ms so freshness can continue to advance even when no network packet arrives. This allows evidence to transition from `FRESH` to `STALE` when the PX4 source becomes silent rather than leaving cached evidence fresh indefinitely.
-
-A live stale-state test produced:
+The shared usability invariant is:
 
 ```text
-local_freshness=0 age_ms=0
-local_freshness=1 age_ms=3041
+valid == true && freshness == FRESH
 ```
 
-### Evidence Usability
+`EvidenceSnapshot` freezes a copy of the current PX4-derived evidence for one decision.
 
-A shared helper defines the current evidence-usability invariant:
+## Phase 4 — Mission-Revision Security Core
+
+### Mission Reconstruction and Canonicalization
+
+Implemented modules:
 
 ```text
-valid == true AND freshness == FRESH → usable
-otherwise                             → not usable
+mission_reconstructor.h/.cpp
+canonical_mission.h/.cpp
+mission_revision.h/.cpp
+mission_revision_tracker.h/.cpp
 ```
 
-Unit-test output verified:
+DRACO buffers the normal MAVLink mission-upload transaction, reconstructs the complete mission and creates a deterministic canonical representation used for revision hashing and comparison.
+
+Committed revision state tracks:
 
 ```text
-unknown usable: 0
-fresh usable: 1
-stale usable: 0
-invalid usable: 0
+parent
+current
+proposed
+history
 ```
 
-This prevents unknown, stale or invalid evidence from being silently treated as trustworthy.
+A proposed revision is committed only after PX4 returns an accepted `MISSION_ACK`.
 
-### Evidence Snapshot
+### Semantic Mission Delta
 
-Phase 3 also introduces `EvidenceSnapshot`.
-
-A snapshot copies the current `StateCache`, records a monotonic capture time and refreshes freshness on the copied evidence. The intended use is to provide one frozen evidence view for a single security decision instead of reading a live cache that may change between individual field accesses.
-
-A unit test verified that the live cache can change while the snapshot remains unchanged:
+Implemented modules:
 
 ```text
-live armed: 1
-snapshot armed: 0
+mission_delta.h/.cpp
 ```
 
-### Verified Live Evidence
-
-Live PX4 SITL/QGroundControl testing directly verified:
-
-- ARM → DISARM state changes
-- PX4 base/custom/system-status updates
-- landed-state transition through takeoff and landing
-- global position, local position, altitude and velocity changes
-- mission-state decoding with no mission stored
-- mission-state decoding after uploading a five-item QGroundControl mission
-- control/offboard-state decoding
-- system-health updates
-- estimator-status updates
-- `FRESH` → `STALE` transition when PX4 telemetry stops
-- snapshot immutability after the live cache changes
-
-The final integration smoke test kept the transparent QGroundControl ↔ DRACO ↔ PX4 path operational through normal flight activity including arming, takeoff, movement, landing and disarming while the Phase 3 evidence layer remained active.
-
-## Command Path Verification
-
-The current regression path remains:
+The semantic delta distinguishes mission evolution beyond simple packet equality. Supported change categories include:
 
 ```text
+NO_OP
+INSERT
+DELETE
+MOVE_HORIZONTAL
+ALTITUDE_CHANGE
+COMMAND_CHANGE
+PARAMETER_CHANGE
+REORDER
+DESTINATION_CHANGE
+MAJOR_REPLACEMENT
+```
+
+The delta summary also records changed-item ratio, maximum horizontal/altitude change, destination change and introduction of critical commands.
+
+### Independent Mission-Intent Contract
+
+Implemented modules:
+
+```text
+mission_intent_contract.h/.cpp
+```
+
+The contract supports:
+
+- start region
+- terminal region
+- authorized corridor
+- excluded regions
+- altitude envelope
+- allowed mission commands
+- emergency command policy
+- authority policy
+- in-flight replanning policy
+- destination-change authority
+- optional validity window
+
+The contract is logically independent of the proposed mission; a proposal does not define its own authorization policy.
+
+### Revision Causality
+
+Implemented modules:
+
+```text
+mission_revision_causality.h/.cpp
+```
+
+Revision classifications include:
+
+```text
+INITIAL_MISSION
+NO_OP_REUPLOAD
+NORMAL_CHILD
+STALE_PARENT
+ROLLBACK
+CONCURRENT_CONFLICT
+UNRELATED_REPLACEMENT
+```
+
+Hard causality violations currently include semantic rollback, stale parent and concurrent revision conflict.
+
+### Pre-Forward Authorization
+
+Implemented modules:
+
+```text
+mission_authorization.h/.cpp
+```
+
+Authorization outcomes are:
+
+```text
+ALLOW
+DENY
+DEFER
+REQUIRE_HIGHER_AUTHORITY
+```
+
+The authorization gate evaluates revision causality, change budget, intent contract, authority, flight phase and mission content.
+
+Verified live behavior:
+
+```text
+ALLOW
+  → DRACO starts its own mission upload toward PX4
+  → PX4 requests mission items from DRACO
+  → DRACO sends the authorized buffered mission
+  → PX4 accepts the mission
+  → DRACO commits the revision
+
+DENY
+  → proposed revision is rejected locally
+  → DRACO returns MAV_MISSION_DENIED to the GCS
+  → no authorized DRACO→PX4 mission transaction starts
+```
+
+### Decision Record and Evidence Binding
+
+Implemented modules:
+
+```text
+mission_decision_record.h/.cpp
+```
+
+A decision record binds together the proposal, semantic delta, causality classification, authority, PX4 evidence snapshot, evidence usability, flight state, change-budget result and authorization result.
+
+If the required PX4 evidence is unusable, an otherwise `ALLOW` result is converted to `DEFER`.
+
+Policy provenance fields record the mission-intent contract ID/version and change-budget policy ID/version.
+
+### Change Budget
+
+Implemented modules:
+
+```text
+mission_change_budget.h/.cpp
+```
+
+The change-budget layer can constrain:
+
+- maximum horizontal change
+- maximum altitude change
+- insertion count
+- deletion count
+- changed-item ratio
+- destination change
+
+`SECURITY_ADMIN` may override the change budget, but that does not override hard causality or hard intent checks. `EMERGENCY_AUTHORITY` is intentionally not a generic budget bypass.
+
+## Phase 4 Test Coverage
+
+Current tests include:
+
+```text
+tests/mission_delta_test.cpp
+tests/mission_intent_contract_test.cpp
+tests/mission_revision_causality_test.cpp
+tests/test_mission_authorization.cpp
+tests/test_mission_change_budget.cpp
+tests/test_phase4_research_freeze.cpp
+```
+
+Verified authorization cases include:
+
+- normal child allowed
+- rollback denied
+- stale parent denied
+- concurrent conflict denied
+- destination change requires higher authority
+- security administrator destination change allowed
+- invalid/unprovisioned contract deferred
+- change-budget violation requires higher authority
+- in-flight replanning policy enforced
+- security administrator in-flight replan allowed
+- security administrator cannot override rollback
+
+The change-budget unit suite verifies no-op, horizontal/altitude thresholds, insertion/deletion limits, changed-item ratio, destination policy, emergency-authority non-bypass, administrator budget override and delta immutability.
+
+The Task 11 research-freeze test locks the current benign/adversarial populations, baselines, ablations, metrics, mission-size scale points and Codex handoff boundary.
+
+## Frozen Evaluation Scenarios
+
+Benign population:
+
+```text
+BENIGN_NO_OP
+BENIGN_SMALL_CORRECTION
+BENIGN_INSERT_DELETE
+BENIGN_ALTITUDE_CORRECTION
+BENIGN_DETOUR
+BENIGN_IN_FLIGHT_REPLAN
+```
+
+Adversarial population:
+
+```text
+ATTACK_SEMANTIC_ROLLBACK
+ATTACK_STALE_PARENT
+ATTACK_CONCURRENT_CONFLICT
+ATTACK_DESTINATION_DIVERSION
+ATTACK_COMMAND_SUBSTITUTION
+ATTACK_MAJOR_REPLACEMENT
+ATTACK_OUTSIDE_INTENT
+```
+
+The most important rollback case is a fresh mission transaction containing content from an old superseded revision. It is not a replay of captured MAVLink packets.
+
+## Frozen Baselines and Ablations
+
+Baselines:
+
+```text
+BASELINE_A — plain MAVLink
+BASELINE_B — MAVLink signing/authenticity only
+BASELINE_C — signing + native PX4 feasibility/geofence controls
+BASELINE_D — closest stateful-proxy style behavior reproducible in the prototype
+BASELINE_E — full DRACO
+```
+
+Ablations:
+
+```text
+ABLATION_NO_DELTA
+ABLATION_NO_INTENT
+ABLATION_NO_CAUSALITY
+ABLATION_NO_FRESH_EVIDENCE
+ABLATION_NO_CHANGE_BUDGET
+```
+
+No result should be reported for a baseline or ablation unless it is actually implemented and executed.
+
+## Current Experimental Metrics
+
+The frozen evaluation tracks:
+
+- semantic-delta precision/recall/F1 and alignment accuracy
+- malicious proposals blocked / false negatives
+- legitimate proposals allowed / false positives
+- canonicalization latency
+- mission-hash latency
+- semantic-delta latency
+- policy/authorization latency
+- end-to-end decision latency
+- p50 / p95 / p99 latency
+- mission-size scaling
+- rollback detection success
+- stale-parent detection success
+- conflict detection success
+- PX4 unchanged-after-denial invariant
+
+Frozen mission-size points:
+
+```text
+10
+50
+100
+500
+1000
+```
+
+## Known Prototype Limitations / Temporary Configuration
+
+The Phase 4 research semantics are complete, but the current live gateway still contains development placeholders that are intentionally being replaced during the evaluation/cleanup stage:
+
+- the live SITL mission-intent contract is currently hard-coded in `udp_gateway.cpp`
+- the live proposer identifier is currently `"unbound-gcs"`
+- the live authority is currently hard-coded to `NORMAL_OPERATOR`
+- current change-budget thresholds are experimental policy values, not universal safety constants
+- SYSID/COMPID/IP/UDP endpoint are not treated as cryptographically authenticated GCS identity
+- mission interception is currently datagram-level; a future engineering cleanup must preserve behavior correctly if mission and non-mission frames share one datagram
+
+These items are implementation/provisioning cleanup tasks. They are not permission to redefine the frozen mission-delta, causality, intent, authorization or threat-model semantics.
+
+## Build
+
+Environment used during development:
+
+```text
+Windows 11
+WSL2
+Ubuntu 24.04 LTS
+g++ 13.x
+PX4 SITL
+Gazebo X500
 QGroundControl
-      ↓
-DRACO UDP gateway
-      ↓
-MAVLink parser
-      ↓
-semantic classifier
-      ↓
-PX4-derived evidence observation
-      ↓
-original frame forwarded to PX4
-      ↓
-PX4 response / telemetry
-      ↓
-DRACO
-      ↓
-QGroundControl
 ```
 
-Evidence observation does not replace or re-encode the forwarded MAVLink frame.
+PX4 SITL:
+
+```bash
+cd ~/PX4-Autopilot
+make px4_sitl gz_x500
+```
+
+DRACO:
+
+```bash
+g++ main.cpp \
+udp_gateway.cpp \
+mavlink_parser.cpp \
+semantic_classifier.cpp \
+state_cache.cpp \
+mission_reconstructor.cpp \
+canonical_mission.cpp \
+mission_revision.cpp \
+mission_revision_tracker.cpp \
+mission_delta.cpp \
+mission_intent_contract.cpp \
+mission_revision_causality.cpp \
+mission_authorization.cpp \
+mission_decision_record.cpp \
+mission_change_budget.cpp \
+-I"$HOME/PX4-Autopilot/build/px4_sitl_default/mavlink" \
+-o draco \
+-lcrypto
+```
 
 ## Repository Layout
 
@@ -363,55 +528,40 @@ Evidence observation does not replace or re-encode the forwarded MAVLink frame.
 .
 ├── main.cpp
 ├── udp_gateway.cpp
-├── mavlink_parser.h
-├── mavlink_parser.cpp
-├── semantic_classifier.h
-├── semantic_classifier.cpp
-├── state_cache.h
-├── state_cache.cpp
+├── mavlink_parser.h/.cpp
+├── semantic_classifier.h/.cpp
+├── state_cache.h/.cpp
+├── mission_reconstructor.h/.cpp
+├── canonical_mission.h/.cpp
+├── mission_revision.h/.cpp
+├── mission_revision_tracker.h/.cpp
+├── mission_delta.h/.cpp
+├── mission_intent_contract.h/.cpp
+├── mission_revision_causality.h/.cpp
+├── mission_authorization.h/.cpp
+├── mission_decision_record.h/.cpp
+├── mission_change_budget.h/.cpp
+├── phase4_research_freeze.h/.cpp
 ├── tests/
-│   ├── parser_test.cpp
-│   └── state_cache_test.cpp
+├── docs/
 ├── .gitignore
 ├── LICENSE
-├── README.md
-└── docs/
-    ├── README.md
-    ├── system-architecture.md
-    ├── protocol-design.md
-    ├── threat-model.md
-    ├── development-roadmap.md
-    └── CHANGELOG.md
+└── README.md
 ```
 
-## Current Development State
+## Branches
 
-DRACO now has a verified transparent real-GCS MAVLink path, direction-aware protocol parsing, semantic classification and a PX4-derived evidence layer with freshness and snapshot semantics.
+`main` is the clean Phase 4 research-core checkpoint.
 
-The current public implementation can:
+`codex-evaluation` is reserved for post-freeze engineering cleanup and controlled local PX4-SITL evaluation. Changes on that branch should not alter the frozen security semantics unless a concrete bug is identified and reviewed first.
 
-- receive and forward live MAVLink traffic bidirectionally
-- parse valid MAVLink frames using generated MAVLink headers
-- preserve the original received frame bytes for forwarding
-- distinguish GCS → PX4 from PX4 → GCS traffic
-- classify broad MAVLink message families
-- decode `COMMAND_LONG` and `COMMAND_INT`
-- map recognized commands and write operations into semantic operations
-- identify selected PX4-originated state-evidence messages
-- cache armed, mode, landed, position, velocity, mission, health and estimator evidence
-- retain source system/component identifiers and monotonic observation timestamps
-- track evidence age and `FRESH`/`STALE`/`INVALID`/`UNKNOWN` state
-- reject unknown, stale or invalid evidence from the shared usability helper
-- create immutable per-decision evidence snapshots
-- conservatively label unclassified GCS-side traffic
-- reject incomplete input from the parsed-message output
-- preserve the live QGroundControl ↔ PX4 command and telemetry path while observation is active
+## Safety Scope
 
-Further research mechanisms are intentionally not described in the public repository until they have been implemented and experimentally verified.
+The adversarial evaluation is intended only for systems owned and controlled by this project, specifically localhost DRACO and PX4 SITL. The repository does not authorize testing against real aircraft, external UAVs or third-party systems.
 
 ## Documentation Policy
 
-Public documentation is deliberately limited to completed implementation, verified observations, reproducible current-state behavior and experimentally demonstrated milestones. Unimplemented research mechanisms, future experimental phases and unpublished design details are intentionally kept outside the public repository.
+Public documentation is limited to implemented behavior, verified tests, frozen experiment definitions and clearly identified prototype limitations. Unexecuted evaluation results must not be presented as measured results.
 
 ## License
 
