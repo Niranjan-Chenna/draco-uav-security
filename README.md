@@ -16,7 +16,7 @@ Completed and verified milestones:
 - Phase 3 — PX4-derived state evidence, freshness and snapshots ✅
 - Phase 4 — mission-revision security core, Tasks 1–11 ✅
 
-Phase 4 research semantics are now frozen. Ongoing work on the `codex-evaluation` branch is limited to implementation cleanup, replacement of temporary SITL placeholders, automated benign/adversarial evaluation, baselines, ablations, metrics, result logging and packaging. It must not redefine the frozen security semantics.
+Phase 4 research semantics are now frozen. Ongoing work on the `evaluation` branch is limited to implementation cleanup, replacement of temporary SITL placeholders, automated benign/adversarial evaluation, baselines, ablations, metrics, result logging and packaging. It must not redefine the frozen security semantics.
 
 ## Security Goal
 
@@ -383,7 +383,7 @@ Verified authorization cases include:
 
 The change-budget unit suite verifies no-op, horizontal/altitude thresholds, insertion/deletion limits, changed-item ratio, destination policy, emergency-authority non-bypass, administrator budget override and delta immutability.
 
-The Task 11 research-freeze test locks the current benign/adversarial populations, baselines, ablations, metrics, mission-size scale points and Codex handoff boundary.
+The Task 11 research-freeze test locks the current benign/adversarial populations, baselines, ablations, metrics, mission-size scale points and evaluation handoff boundary.
 
 ## Frozen Evaluation Scenarios
 
@@ -553,7 +553,7 @@ mission_change_budget.cpp \
 
 `main` is the clean Phase 4 research-core checkpoint.
 
-`codex-evaluation` is reserved for post-freeze engineering cleanup and controlled local PX4-SITL evaluation. Changes on that branch should not alter the frozen security semantics unless a concrete bug is identified and reviewed first.
+`evaluation` is reserved for post-freeze engineering cleanup and controlled local PX4-SITL evaluation. Changes on that branch should not alter the frozen security semantics unless a concrete bug is identified and reviewed first.
 
 ## Safety Scope
 
